@@ -1,46 +1,16 @@
-import os
-import pandas as pd
 from typing import Tuple, Optional, List
-from pathlib import Path
 from gensim.models import Phrases
 import pyLDAvis.gensim_models
 from pyLDAvis._prepare import PreparedData
-
-import seaborn as sns
-sns.set_theme(style="whitegrid")
 from wordcloud import WordCloud, STOPWORDS
 from nltk import RegexpTokenizer, WordNetLemmatizer
 from gensim.corpora import Dictionary
 from gensim.models import LdaModel
 from datetime import datetime
 
-DATA_HOME_ENV = "DATA_HOME_DIR"
-DATA_HOME_DIR_DEFAULT = "/kaggle/input"
-DATA_TMP_ENV = "TMP_DIR"
-COMPETITION_SUBDIR = "commonlit-evaluate-student-summaries"
-PRO_TRAIN_FILE = "prompts_train.csv"
-PRO_TEST_FILE = "prompts_test.csv"
-SUM_TRAIN_FILE = "summaries_train.csv"
-SUM_TEST_FILE = "summaries_test.csv"
 
-
-def read_data(input_data_dir: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-
-    if input_data_dir is None:
-        input_data_dir = os.environ.get(DATA_HOME_ENV)
-    if input_data_dir is None:
-        input_data_dir = DATA_HOME_DIR_DEFAULT
-    data_dir = Path(input_data_dir)
-    if not data_dir.exists():
-        raise FileNotFoundError(f"Directory not found! {data_dir}")
-
-    train_pro = pd.read_csv(data_dir / COMPETITION_SUBDIR / PRO_TRAIN_FILE)
-    test_pro = pd.read_csv(data_dir / COMPETITION_SUBDIR / PRO_TEST_FILE)
-    train_sum = pd.read_csv(data_dir / COMPETITION_SUBDIR / SUM_TRAIN_FILE)
-    test_sum = pd.read_csv(data_dir / COMPETITION_SUBDIR / SUM_TEST_FILE)
-
-    return train_pro, test_pro, train_sum, test_sum
-
+import seaborn as sns
+sns.set_theme(style="whitegrid")
 
 def docs_preprocessor(docs: List[str]) -> List[List[str]]:
     tokenizer = RegexpTokenizer(r'\w+')

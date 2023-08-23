@@ -21,3 +21,8 @@ datasets
 wordcloud
 gensim
 pyldavis
+torchtext
+protobuf==3.20.*  # huggingface requirement for downloading models
+accelerate>=0.20.1 # Using the `Trainer` with `PyTorch` requires `accelerate>=0.20.1`
+datasets
+wandb

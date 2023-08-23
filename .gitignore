@@ -1,5 +1,8 @@
 input/**
 data/**
+tmp/**
+wandb/**
+.idea/**
 
 
 # Byte-compiled / optimized / DLL files
