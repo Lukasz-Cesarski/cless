@@ -177,7 +177,7 @@ def training_loop(args=None):
     training_args.evaluation_strategy = "steps"
     training_args.eval_steps = STEPS_VAL
     training_args.save_total_limit = 2
-    training_args.num_train_epochs = 5
+    training_args.num_train_epochs = 3
     training_args.save_strategy = "steps"
     training_args.save_steps = STEPS_VAL
 
@@ -238,18 +238,19 @@ def training_loop(args=None):
     )
 
     trainer.train()
-    trainer.evaluate()
+    eval_res = trainer.evaluate()
 
     model.config.best_metric = trainer.state.best_metric
     model.config.save_pretrained(training_args.output_dir)
 
     dump_dir = os.path.join(
         "model_dumps",
-        model_config.name_or_path.replace("/", "-"),
+        model_config.name_or_path.replace("/", "-") + f"_fold-{config.fold}",
     )
     os.makedirs(dump_dir, exist_ok=True)
     trainer.save_model(output_dir=dump_dir)
     shutil.rmtree(training_args.output_dir)
     run.finish()
 
+    return eval_res
 
