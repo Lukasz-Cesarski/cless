@@ -1,25 +1,24 @@
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 from pathlib import Path
-from typing import Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
+import torch
 import wandb
+from autocorrect import Speller
 from datasets import Dataset
-from transformers import (AutoConfig, AutoModelForSequenceClassification,
-                          AutoTokenizer, DataCollatorWithPadding,
-                          EarlyStoppingCallback, Trainer,
-                          TrainingArguments, set_seed)
-
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.tokenize.treebank import TreebankWordDetokenizer
-import re
-from autocorrect import Speller
 from spellchecker import SpellChecker
-
+from transformers import (AutoConfig, AutoModelForSequenceClassification,
+                          AutoTokenizer, DataCollatorWithPadding,
+                          EarlyStoppingCallback, Trainer, TrainingArguments,
+                          set_seed)
 
 PRO_TRAIN_FILE = "prompts_train.csv"
 PRO_TEST_FILE = "prompts_test.csv"
@@ -36,8 +35,9 @@ ID2FOLD = {
     "ebad26": 3,
 }
 
+
 def read_data(
-        input_data_dir: str,
+    input_data_dir: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
     data_dir = Path(input_data_dir)
@@ -79,11 +79,11 @@ class Config:
         metadata={"help": "Number of processes to tokenize dataset"},
     )
     hidden_dropout_prob: Optional[float] = field(
-        default=0.1,
+        default=0.05,
         metadata={"help": "Amount of dropout to apply (hidden)"},
     )
     attention_probs_dropout_prob: Optional[float] = field(
-        default=0.1,
+        default=0.05,
         metadata={"help": "Amount of dropout to apply (attention)"},
     )
     learning_rate: Optional[float] = field(
@@ -159,10 +159,10 @@ def compute_mcrmse(eval_pred):
 
 class ClessDeberta:
     def __init__(
-            self,
-            model_name_or_path: str,
-            tmp_dir: str,
-            dump_dir: str,
+        self,
+        model_name_or_path: str,
+        tmp_dir: str,
+        dump_dir: str,
     ):
         self.model_name_or_path = model_name_or_path
         self.tmp_dir = tmp_dir
@@ -177,16 +177,14 @@ class ClessDeberta:
                 "problem_type": "regression",
             }
         )
-        self.data_collator = DataCollatorWithPadding(
-            tokenizer=self.tokenizer
-        )
+        self.data_collator = DataCollatorWithPadding(tokenizer=self.tokenizer)
 
     @staticmethod
     def tokenize(
-            example,
-            tokenizer,
-            config,
-            labelled=True,
+        example,
+        tokenizer,
+        config,
+        labelled=True,
     ):
         sep = tokenizer.sep_token
 
@@ -215,9 +213,9 @@ class ClessDeberta:
         return result
 
     def train(
-            self,
-            config: Config,
-            fold: int,
+        self,
+        config: Config,
+        fold: int,
     ):
         run = wandb.init(
             reinit=True,
@@ -225,11 +223,13 @@ class ClessDeberta:
             config=config.__dict__,
         )
         set_seed(config.seed)
-        self.model_config.update({
-            "hidden_dropout_prob": config.hidden_dropout_prob,
-            "attention_probs_dropout_prob": config.attention_probs_dropout_prob,
-            "cfg": config.__dict__,
-        })
+        self.model_config.update(
+            {
+                "hidden_dropout_prob": config.hidden_dropout_prob,
+                "attention_probs_dropout_prob": config.attention_probs_dropout_prob,
+                "cfg": config.__dict__,
+            }
+        )
 
         train_pro, test_pro, train_sum, test_sum = read_data(config.data_dir)
         df = train_pro.merge(train_sum, on="prompt_id")
@@ -243,7 +243,7 @@ class ClessDeberta:
             batched=False,
             num_proc=config.num_proc,
             fn_kwargs={"tokenizer": self.tokenizer, "config": config},
-    )
+        )
         val_ds = val_ds.map(
             self.tokenize,
             batched=False,
@@ -258,7 +258,7 @@ class ClessDeberta:
             dry_run_ds = val_ds.train_test_split(None, 10)
             val_ds = dry_run_ds["train"]
 
-        STEPS_VAL = 100
+        STEPS_VAL = 50
         training_args = TrainingArguments(
             output_dir=self.tmp_dir,
             load_best_model_at_end=True,  # select best model
@@ -274,12 +274,11 @@ class ClessDeberta:
             eval_steps=STEPS_VAL,
             save_steps=STEPS_VAL,
             metric_for_best_model="mcrmse",
-            save_total_limit=1
+            save_total_limit=1,
         )
 
         model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name_or_path,
-            config=self.model_config
+            self.model_name_or_path, config=self.model_config
         )
 
         trainer = Trainer(
@@ -290,7 +289,7 @@ class ClessDeberta:
             data_collator=self.data_collator,
             tokenizer=self.tokenizer,
             compute_metrics=compute_mcrmse,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=10)],
         )
         trainer.train()
         eval_res = trainer.evaluate()
@@ -309,20 +308,22 @@ class ClessDeberta:
 
     def predict(self, df):
         config = Config(**self.model_config.cfg)
-        # train_pro, test_pro, train_sum, test_sum = read_data(config.data_dir)
-
-        # df = train_pro.merge(train_sum, on="prompt_id")
-        # df = test_pro.merge(test_sum, on="prompt_id")
         test_ds = Dataset.from_pandas(df)
         test_ds = test_ds.map(
             tokenize,
             batched=False,
             num_proc=config.num_proc,
-            fn_kwargs={"tokenizer": self.tokenizer, "config": config, "labelled": False},
+            fn_kwargs={
+                "tokenizer": self.tokenizer,
+                "config": config,
+                "labelled": False,
+            },
         )
 
         model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name_or_path, config=self.model_config, ignore_mismatched_sizes=True
+            self.model_name_or_path,
+            config=self.model_config,
+            ignore_mismatched_sizes=True,
         )
         model.eval()
 
@@ -337,7 +338,8 @@ class ClessDeberta:
             model=model,
             tokenizer=self.tokenizer,
             data_collator=self.data_collator,
-            args=test_args)
+            args=test_args,
+        )
         predictions = infer.predict(test_dataset=test_ds)
 
         return predictions
@@ -346,19 +348,19 @@ class ClessDeberta:
 class Preprocessor:
     def __init__(self) -> None:
         self.twd = TreebankWordDetokenizer()
-        self.STOP_WORDS = set(stopwords.words('english'))
+        self.STOP_WORDS = set(stopwords.words("english"))
 
-        self.speller = Speller(lang='en')
+        self.speller = Speller(lang="en")
         self.spellchecker = SpellChecker()
 
     def word_overlap_count(self, row):
-        """ intersection(prompt_text, text) """
+        """intersection(prompt_text, text)"""
 
         def check_is_stop_word(word):
             return word in self.STOP_WORDS
 
-        prompt_words = row['prompt_tokens']
-        summary_words = row['summary_tokens']
+        prompt_words = row["prompt_tokens"]
+        summary_words = row["summary_tokens"]
         if self.STOP_WORDS:
             prompt_words = list(filter(check_is_stop_word, prompt_words))
             summary_words = list(filter(check_is_stop_word, summary_words))
@@ -372,8 +374,8 @@ class Preprocessor:
 
     def ngram_co_occurrence(self, row, n: int) -> int:
         # Tokenize the original text and summary into words
-        original_tokens = row['prompt_tokens']
-        summary_tokens = row['summary_tokens']
+        original_tokens = row["prompt_tokens"]
+        summary_tokens = row["summary_tokens"]
 
         # Generate n-grams for the original text and summary
         original_ngrams = set(self.ngrams(original_tokens, n))
@@ -384,8 +386,8 @@ class Preprocessor:
         return len(common_ngrams)
 
     def quotes_count(self, row):
-        summary = row['text']
-        text = row['prompt_text']
+        summary = row["text"]
+        text = row["prompt_text"]
         quotes_from_summary = re.findall(r'"([^"]*)"', summary)
         if len(quotes_from_summary) > 0:
             return [quote in text for quote in quotes_from_summary].count(True)
@@ -404,10 +406,11 @@ class Preprocessor:
         self.spellchecker.word_frequency.load_words(tokens)
         self.speller.nlp_data.update({token: 1000 for token in tokens})
 
-    def run(self,
-            prompts: pd.DataFrame,
-            summaries: pd.DataFrame,
-            ) -> pd.DataFrame:
+    def run(
+        self,
+        prompts: pd.DataFrame,
+        summaries: pd.DataFrame,
+    ) -> pd.DataFrame:
 
         # before merge preprocess
         prompts["prompt_length"] = prompts["prompt_text"].apply(
@@ -425,9 +428,7 @@ class Preprocessor:
         )
 
         # Add prompt tokens into spelling checker dictionary
-        prompts["prompt_tokens"].apply(
-            lambda x: self.add_spelling_dictionary(x)
-        )
+        prompts["prompt_tokens"].apply(lambda x: self.add_spelling_dictionary(x))
 
         #         from IPython.core.debugger import Pdb; Pdb().set_trace()
         # fix misspelling
@@ -442,21 +443,69 @@ class Preprocessor:
         input_df = summaries.merge(prompts, how="left", on="prompt_id")
 
         # after merge preprocess
-        input_df['length_ratio'] = input_df['summary_length'] / input_df['prompt_length']
+        input_df["length_ratio"] = (
+            input_df["summary_length"] / input_df["prompt_length"]
+        )
 
-        input_df['word_overlap_count'] = input_df.progress_apply(self.word_overlap_count, axis=1)
-        input_df['bigram_overlap_count'] = input_df.progress_apply(
+        input_df["word_overlap_count"] = input_df.progress_apply(
+            self.word_overlap_count, axis=1
+        )
+        input_df["bigram_overlap_count"] = input_df.progress_apply(
             self.ngram_co_occurrence, args=(2,), axis=1
         )
-        input_df['bigram_overlap_ratio'] = input_df['bigram_overlap_count'] / (input_df['summary_length'] - 1)
+        input_df["bigram_overlap_ratio"] = input_df["bigram_overlap_count"] / (
+            input_df["summary_length"] - 1
+        )
 
-        input_df['trigram_overlap_count'] = input_df.progress_apply(
+        input_df["trigram_overlap_count"] = input_df.progress_apply(
             self.ngram_co_occurrence, args=(3,), axis=1
         )
-        input_df['trigram_overlap_ratio'] = input_df['trigram_overlap_count'] / (input_df['summary_length'] - 2)
+        input_df["trigram_overlap_ratio"] = input_df["trigram_overlap_count"] / (
+            input_df["summary_length"] - 2
+        )
 
-        input_df['quotes_count'] = input_df.progress_apply(self.quotes_count, axis=1)
+        input_df["quotes_count"] = input_df.progress_apply(self.quotes_count, axis=1)
 
         input_df["fold"] = input_df["prompt_id"].map(ID2FOLD)
 
         return input_df.drop(columns=["summary_tokens", "prompt_tokens"])
+
+
+def cless_predict(folds_dir, df):
+    predictions = {}
+    for fold in range(4):
+        fold_path = os.path.join(folds_dir, str(fold))
+        print(fold_path)
+        assert os.path.isdir(fold_path)
+        cless_deberta = ClessDeberta(
+            model_name_or_path=fold_path, tmp_dir="tmp/", dump_dir="model_dumps/"
+        )
+        fold_prediction = cless_deberta.predict(df)
+        partial_submission = pd.concat(
+            [
+                df["student_id"],
+                pd.DataFrame(
+                    fold_prediction.predictions, columns=["content", "wording"]
+                ),
+            ],
+            axis=1,
+        )
+        predictions[fold] = partial_submission
+    return predictions
+
+
+def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    if save_path.exists():
+        return torch.load(save_path)
+
+    if preprocessor is None:
+        preprocessor = Preprocessor()
+    input_df = preprocessor.run(
+        prompts=prompts,
+        summaries=summaries,
+    )
+    torch.save(input_df, save_path)
+
+    return input_df
