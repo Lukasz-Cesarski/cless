@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import wandb
+from tqdm import tqdm
 from autocorrect import Speller
 from datasets import Dataset
 from nltk.corpus import stopwords
@@ -19,6 +20,8 @@ from transformers import (AutoConfig, AutoModelForSequenceClassification,
                           AutoTokenizer, DataCollatorWithPadding,
                           EarlyStoppingCallback, Trainer, TrainingArguments,
                           set_seed)
+
+tqdm.pandas()
 
 PRO_TRAIN_FILE = "prompts_train.csv"
 PRO_TEST_FILE = "prompts_test.csv"
@@ -413,19 +416,14 @@ class Preprocessor:
     ) -> pd.DataFrame:
 
         # before merge preprocess
-        prompts["prompt_length"] = prompts["prompt_text"].apply(
-            lambda x: len(word_tokenize(x))
-        )
         prompts["prompt_tokens"] = prompts["prompt_text"].apply(
             lambda x: word_tokenize(x)
         )
-
-        summaries["summary_length"] = summaries["text"].apply(
-            lambda x: len(word_tokenize(x))
-        )
+        prompts["prompt_length"] = prompts["prompt_tokens"].apply(len)
         summaries["summary_tokens"] = summaries["text"].apply(
             lambda x: word_tokenize(x)
         )
+        summaries["summary_length"] = summaries["summary_tokens"].apply(len)
 
         # Add prompt tokens into spelling checker dictionary
         prompts["prompt_tokens"].apply(lambda x: self.add_spelling_dictionary(x))
@@ -509,3 +507,24 @@ def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
     torch.save(input_df, save_path)
 
     return input_df
+
+
+def choose_fold(row, target, ignore_fold):
+    if ignore_fold:
+        clean_targets = [f"{target}_{idx}" for idx in range(4)]
+    else:
+        fold = row["fold"]
+        clean_targets = [f"{target}_{fold}"]
+    mean_value = row[clean_targets].mean()
+    return mean_value
+
+
+def merge_features(preprocessed_df, deberta_features, ignore_fold=False):
+    # mean of non-leak predictions
+    merged_df = pd.merge(preprocessed_df, deberta_features, on="student_id", how="left")
+    merged_df["deberta_content"] = merged_df.apply(lambda x: choose_fold(x, "content", ignore_fold), axis=1)
+    merged_df["deberta_wording"] = merged_df.apply(lambda x: choose_fold(x, "wording", ignore_fold), axis=1)
+
+    merged_df = merged_df.drop(columns=[f"content_{f}" for f in range(4)] + [f"wording_{f}" for f in range(4)])
+
+    return merged_df
