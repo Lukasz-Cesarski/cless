@@ -20,6 +20,10 @@ from transformers import (AutoConfig, AutoModelForSequenceClassification,
                           AutoTokenizer, DataCollatorWithPadding,
                           EarlyStoppingCallback, Trainer, TrainingArguments,
                           set_seed)
+import lightgbm as lgb
+from sklearn.metrics import mean_squared_error
+from wandb.lightgbm import wandb_callback, log_summary
+
 
 tqdm.pandas()
 
@@ -30,6 +34,8 @@ SUM_TEST_FILE = "summaries_test.csv"
 
 WANDB_FOLDS_PROJECT = "cless-folds"
 WANDB_ENSAMBLE_PROJECT = "cless-ensamble"
+WANDB_LGBM_FOLDS_PROJECT = "cless-lgbm-folds"
+WANDB_LGBM_ENSAMBLE_PROJECT = "cless-lgbm-ensamble"
 
 ID2FOLD = {
     "814d6b": 0,
@@ -528,3 +534,97 @@ def merge_features(preprocessed_df, deberta_features, ignore_fold=False):
     merged_df = merged_df.drop(columns=[f"content_{f}" for f in range(4)] + [f"wording_{f}" for f in range(4)])
 
     return merged_df
+
+
+def train_lgbm(train, targets, drop_columns):
+    # https://colab.research.google.com/drive/181GCGp36_75C2zm7WLxr9U2QjMXXoibt#scrollTo=aIhxl7glaJ5k
+    # defaults
+    default_params = {
+        'boosting_type': 'gbdt',
+        'random_state': 42,
+        'objective': 'regression',
+        'metric': 'rmse',
+        'learning_rate': 0.05,
+        'boosting': "gbdt",
+        'num_leaves': 31,
+        'max_depth': -1,
+        'min_data_in_leaf': 20,
+        'min_data_in_bin': 3,
+        'lambda_l1': 0.0,
+        'lambda_l2': 0.0,
+    }
+    # Initialize a new wandb run
+    wandb.init(
+        config=default_params,
+        reinit=True,
+        project=WANDB_LGBM_FOLDS_PROJECT,
+    )
+
+    TRAINING_COLUMNS = None
+    model_dict = {}
+
+    for target in targets:
+        models = []
+
+        for fold in range(4):
+            print(f"target={target}, fold={fold}")
+
+            X_train_cv = train[train["fold"] != fold].drop(columns=drop_columns)
+            y_train_cv = train[train["fold"] != fold][target]
+            TRAINING_COLUMNS = X_train_cv.columns  # to check with prediction
+
+            X_eval_cv = train[train["fold"] == fold].drop(columns=drop_columns)
+            y_eval_cv = train[train["fold"] == fold][target]
+
+            dtrain = lgb.Dataset(X_train_cv, label=y_train_cv)
+            dval = lgb.Dataset(X_eval_cv, label=y_eval_cv)
+
+            evaluation_results = {}
+            # deepcopy may cause MaxRecursionException
+            hyperparameters = {k:v for k, v in wandb.config.items()}
+
+            model = lgb.train(hyperparameters,
+                              num_boost_round=10000,
+                              # categorical_feature = categorical_features,
+                              valid_names=['train', 'valid'],
+                              train_set=dtrain,
+                              valid_sets=dval,
+                              callbacks=[
+                                  lgb.early_stopping(stopping_rounds=30, verbose=True),
+                                  lgb.log_evaluation(100),
+                                  lgb.callback.record_evaluation(evaluation_results),
+                                  # wandb_callback(),
+                              ],
+                              )
+            # log_summary(model, save_model_checkpoint=True)
+            models.append(model)
+
+        model_dict[target] = models
+
+    # cv
+    metrics = {}
+
+    for target in targets:
+        models = model_dict[target]
+
+        preds = []
+        trues = []
+
+        for fold, model in enumerate(models):
+            X_eval_cv = train[train["fold"] == fold].drop(columns=drop_columns)
+            assert (X_eval_cv.columns == TRAINING_COLUMNS).all()
+            y_eval_cv = train[train["fold"] == fold][target]
+
+            pred = model.predict(X_eval_cv)
+
+            trues.extend(y_eval_cv)
+            preds.extend(pred)
+
+        rmse = np.sqrt(mean_squared_error(trues, preds))
+        metrics[target] = rmse
+
+    mcrmse = sum(metrics.values()) / len(metrics)
+    metrics["mcrmse"] = mcrmse
+    wandb.log(metrics)
+
+    return model_dict, metrics
