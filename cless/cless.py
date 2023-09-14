@@ -32,10 +32,12 @@ PRO_TEST_FILE = "prompts_test.csv"
 SUM_TRAIN_FILE = "summaries_train.csv"
 SUM_TEST_FILE = "summaries_test.csv"
 
-WANDB_FOLDS_PROJECT = "cless-folds"
-WANDB_ENSAMBLE_PROJECT = "cless-ensamble"
-WANDB_LGBM_FOLDS_PROJECT = "cless-lgbm-folds"
-WANDB_LGBM_ENSAMBLE_PROJECT = "cless-lgbm-ensamble"
+WANDB_DEBERTA_FOLDS = "cless-folds"
+WANDB_DEBERTA_ENSAMBLE = "cless-ensamble"
+WANDB_DEBERTA_SWEEPS = "cless-deberta-sweeps"
+WANDB_LGBM_FOLDS = "cless-lgbm-folds"
+WANDB_LGBM_ENSAMBLE = "cless-lgbm-ensamble"
+WANDB_LGBM_SWEEPS = "cless-lgbm-sweeps"
 
 ID2FOLD = {
     "814d6b": 0,
@@ -226,11 +228,12 @@ class ClessDeberta:
         config: Config,
         fold: int,
     ):
-        run = wandb.init(
-            reinit=True,
-            project=WANDB_FOLDS_PROJECT,
-            config=config.__dict__,
-        )
+        if config.report_to == "wandb":
+            run = wandb.init(
+                reinit=True,
+                project=WANDB_DEBERTA_FOLDS,
+                config=config.__dict__,
+            )
         set_seed(config.seed)
         self.model_config.update(
             {
@@ -310,7 +313,8 @@ class ClessDeberta:
         )
         os.makedirs(model_fold_dir, exist_ok=True)
         trainer.save_model(output_dir=model_fold_dir)
-        run.finish()
+        if config.report_to == "wandb":
+            run.finish()
         shutil.rmtree(self.tmp_dir)
 
         return eval_res
@@ -557,7 +561,7 @@ def train_lgbm(train, targets, drop_columns):
     wandb.init(
         config=default_params,
         reinit=True,
-        project=WANDB_LGBM_FOLDS_PROJECT,
+        project=WANDB_LGBM_FOLDS,
     )
 
     TRAINING_COLUMNS = None
