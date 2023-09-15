@@ -1,8 +1,20 @@
+"""
+CommonLit - Evaluate Student Summaries (CLESS)
+https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries/overview
+
+This file stores essential parts of code to
+- provide version control in GIT
+- upload it to remote machines
+- paste it in kaggle notebook (use magic `%%writefile cless.py` command)
+- easy code development (code refactor, black, import sort)
+"""
+
 import os
 import re
 import shutil
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from pprint import pprint
+from typing import List, Tuple
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +23,7 @@ import torch
 import wandb
 from tqdm import tqdm
 from autocorrect import Speller
+from datasets import disable_progress_bar
 from datasets import Dataset
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
@@ -22,22 +35,24 @@ from transformers import (AutoConfig, AutoModelForSequenceClassification,
                           set_seed)
 import lightgbm as lgb
 from sklearn.metrics import mean_squared_error
-from wandb.lightgbm import wandb_callback, log_summary
+tqdm.pandas()  # for processor
+disable_progress_bar()
+
+class Files:
+    PRO_TRAIN_FILE = "prompts_train.csv"
+    PRO_TEST_FILE = "prompts_test.csv"
+    SUM_TRAIN_FILE = "summaries_train.csv"
+    SUM_TEST_FILE = "summaries_test.csv"
 
 
-tqdm.pandas()
+class WandbProjects:
+    WANDB_DEBERTA_FOLDS = "cless-deberta-folds"
+    WANDB_DEBERTA_ENSAMBLE = "cless-deberta-ensamble"
+    WANDB_DEBERTA_SWEEPS = "cless-deberta-sweeps"
 
-PRO_TRAIN_FILE = "prompts_train.csv"
-PRO_TEST_FILE = "prompts_test.csv"
-SUM_TRAIN_FILE = "summaries_train.csv"
-SUM_TEST_FILE = "summaries_test.csv"
-
-WANDB_DEBERTA_FOLDS = "cless-folds"
-WANDB_DEBERTA_ENSAMBLE = "cless-ensamble"
-WANDB_DEBERTA_SWEEPS = "cless-deberta-sweeps"
-WANDB_LGBM_FOLDS = "cless-lgbm-folds"
-WANDB_LGBM_ENSAMBLE = "cless-lgbm-ensamble"
-WANDB_LGBM_SWEEPS = "cless-lgbm-sweeps"
+    WANDB_LGBM_FOLDS = "cless-lgbm-folds"
+    WANDB_LGBM_ENSAMBLE = "cless-lgbm-ensamble"
+    WANDB_LGBM_SWEEPS = "cless-lgbm-sweeps"
 
 ID2FOLD = {
     "814d6b": 0,
@@ -46,81 +61,49 @@ ID2FOLD = {
     "ebad26": 3,
 }
 
+CLESS_DATA_ENV = "CLESS_DATA_ENV"
+CLESS_DRY_RUN = "CLESS_DRY_RUN"
+CLESS_DATA_ENV_DEFAULT = "/kaggle/input/"
+TMP_DIR = "tmp"
+MODEL_DUMPS_DIR = "model_dumps"
+TARGET_LABELS = ["content", "wording"]
 
-def read_data(
-    input_data_dir: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
-    data_dir = Path(input_data_dir)
-    if not data_dir.exists():
-        raise FileNotFoundError(f"Directory not found! {data_dir}")
+def read_cless_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    data_home = os.environ.get(CLESS_DATA_ENV)
+    if data_home is None:
+        # default kaggle location
+        data_home = CLESS_DATA_ENV_DEFAULT
+    data_home = Path(data_home)
+    if not data_home.is_dir():
+        raise FileNotFoundError(f"Directory not found! {data_home}")
 
-    train_pro = pd.read_csv(data_dir / PRO_TRAIN_FILE)
-    test_pro = pd.read_csv(data_dir / PRO_TEST_FILE)
-    train_sum = pd.read_csv(data_dir / SUM_TRAIN_FILE)
-    test_sum = pd.read_csv(data_dir / SUM_TEST_FILE)
+    data_home_sub = data_home / "commonlit-evaluate-student-summaries"
+
+    train_pro = pd.read_csv(data_home_sub / Files.PRO_TRAIN_FILE)
+    test_pro = pd.read_csv(data_home_sub / Files.PRO_TEST_FILE)
+    train_sum = pd.read_csv(data_home_sub / Files.SUM_TRAIN_FILE)
+    test_sum = pd.read_csv(data_home_sub / Files.SUM_TEST_FILE)
 
     return train_pro, test_pro, train_sum, test_sum
 
 
 @dataclass
 class Config:
-    model_name_or_path: Optional[str] = field(
-        default="microsoft/deberta-v3-base",
-        metadata={"help": "Model name or path"},
-    )
-    data_dir: Optional[str] = field(
-        default="/kaggle/input/commonlit-evaluate-student-summaries",
-        metadata={"help": "Data directory"},
-    )
-    max_seq_length: Optional[int] = field(
-        default=512,
-        metadata={"help": "Max sequence length"},
-    )
-    add_prompt_question: Optional[bool] = field(
-        default=False,
-        metadata={"help": "Add prompt question into input"},
-    )
-    add_prompt_text: Optional[bool] = field(
-        default=False,
-        metadata={"help": "Add prompt text into input"},
-    )
-    num_proc: Optional[int] = field(
-        default=4,
-        metadata={"help": "Number of processes to tokenize dataset"},
-    )
-    hidden_dropout_prob: Optional[float] = field(
-        default=0.05,
-        metadata={"help": "Amount of dropout to apply (hidden)"},
-    )
-    attention_probs_dropout_prob: Optional[float] = field(
-        default=0.05,
-        metadata={"help": "Amount of dropout to apply (attention)"},
-    )
-    learning_rate: Optional[float] = field(
-        default=5e-05,
-        metadata={"help": "Learning rate"},
-    )
-    weight_decay: Optional[float] = field(
-        default=0.0,
-        metadata={"help": "Weight decay"},
-    )
-    batch_size: Optional[int] = field(
-        default=8,
-        metadata={"help": "Size of the batch"},
-    )
-    num_train_epochs: Optional[int] = field(
-        default=3,
-        metadata={"help": "Number of training epochs"},
-    )
-    seed: Optional[int] = field(
-        default=42,
-        metadata={"help": "Random seed"},
-    )
-    report_to: Optional[str] = field(
-        default="wandb",
-        metadata={"help": "Where to log results"},
-    )
+    model_name_or_path: str = "microsoft/deberta-v3-base"
+    max_seq_length: int = 512
+    add_prompt_question: bool = False
+    add_prompt_text: bool = False
+    hidden_dropout_prob: float = 0.05
+    attention_probs_dropout_prob: float = 0.05
+    learning_rate: float = 5e-05
+    weight_decay: float = 0.0
+    batch_size: int = 8
+    num_train_epochs: int = 3
+    seed: int = 42
+    report_to: str = "wandb"
+    eval_every: int = 50
+    patience = 10  # early stopping
 
 
 def tokenize(example, tokenizer, config, labelled=True):
@@ -134,9 +117,6 @@ def tokenize(example, tokenizer, config, labelled=True):
         cols.append("prompt_text")
     cols.append("text")
 
-    if labelled:
-        labels = [example["content"], example["wording"]]
-
     tokenized = tokenizer(
         sep.join([example[c] for c in cols]),
         padding=False,
@@ -145,35 +125,37 @@ def tokenize(example, tokenizer, config, labelled=True):
     )
 
     result = {**tokenized}  # inplace copy
+
     if labelled:
+        labels = [example[t] for t in TARGET_LABELS]
         result["labels"] = labels
 
     return result
 
 
-def compute_mcrmse(eval_pred):
+def compute_mcrmse_for_trainer(eval_pred):
     """
     Calculates mean columnwise root mean squared error
     https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries/overview/evaluation
+    function adjusted for huggingface trainer
     """
     preds, labels = eval_pred
 
     col_rmse = np.sqrt(np.mean((preds - labels) ** 2, axis=0))
     mcrmse = np.mean(col_rmse)
 
-    return {
-        "content_rmse": col_rmse[0],
-        "wording_rmse": col_rmse[1],
-        "mcrmse": mcrmse,
-    }
+    result = {f"{t}_rmse": col_rmse[idx] for idx, t in enumerate(TARGET_LABELS)}
+    result["mcrmse"] = mcrmse
+
+    return result
 
 
-class ClessDeberta:
+class ClessModel:
     def __init__(
         self,
         model_name_or_path: str,
-        tmp_dir: str,
-        dump_dir: str,
+        tmp_dir: str = TMP_DIR ,
+        dump_dir: str = MODEL_DUMPS_DIR,
     ):
         self.model_name_or_path = model_name_or_path
         self.tmp_dir = tmp_dir
@@ -190,48 +172,15 @@ class ClessDeberta:
         )
         self.data_collator = DataCollatorWithPadding(tokenizer=self.tokenizer)
 
-    @staticmethod
-    def tokenize(
-        example,
-        tokenizer,
-        config,
-        labelled=True,
-    ):
-        sep = tokenizer.sep_token
-
-        cols = []
-
-        if config.add_prompt_question:
-            cols.append("prompt_question")
-        elif config.add_prompt_text:
-            cols.append("prompt_text")
-        cols.append("text")
-
-        if labelled:
-            labels = [example["content"], example["wording"]]
-
-        tokenized = tokenizer(
-            sep.join([example[c] for c in cols]),
-            padding=False,
-            truncation=True,
-            max_length=config.max_seq_length,
-        )
-
-        result = {**tokenized}  # inplace copy
-        if labelled:
-            result["labels"] = labels
-
-        return result
-
-    def train(
+    def train_single_fold(
         self,
         config: Config,
         fold: int,
     ):
         if config.report_to == "wandb":
             run = wandb.init(
-                reinit=True,
-                project=WANDB_DEBERTA_FOLDS,
+                # reinit=True,
+                project=WandbProjects.WANDB_DEBERTA_FOLDS,
                 config=config.__dict__,
             )
         set_seed(config.seed)
@@ -243,7 +192,7 @@ class ClessDeberta:
             }
         )
 
-        train_pro, test_pro, train_sum, test_sum = read_data(config.data_dir)
+        train_pro, test_pro, train_sum, test_sum = read_cless_data()
         df = train_pro.merge(train_sum, on="prompt_id")
         assert set(ID2FOLD.keys()) == set(df["prompt_id"].unique())
         df["fold"] = df["prompt_id"].map(ID2FOLD)
@@ -251,26 +200,24 @@ class ClessDeberta:
         val_ds = Dataset.from_pandas(df[df["fold"] == fold])
 
         train_ds = train_ds.map(
-            self.tokenize,
+            tokenize,
             batched=False,
-            num_proc=config.num_proc,
             fn_kwargs={"tokenizer": self.tokenizer, "config": config},
         )
         val_ds = val_ds.map(
-            self.tokenize,
+            tokenize,
             batched=False,
-            num_proc=config.num_proc,
             fn_kwargs={"tokenizer": self.tokenizer, "config": config},
         )
 
-        if os.environ.get("CLESS_DRY_RUN") == "1":
+        # dry run
+        if os.environ.get(CLESS_DRY_RUN) == "1":
             dry_run_ds = train_ds.train_test_split(None, 20)
             train_ds = dry_run_ds["train"]
 
             dry_run_ds = val_ds.train_test_split(None, 10)
             val_ds = dry_run_ds["train"]
 
-        STEPS_VAL = 50
         training_args = TrainingArguments(
             output_dir=self.tmp_dir,
             load_best_model_at_end=True,  # select best model
@@ -283,8 +230,8 @@ class ClessDeberta:
             greater_is_better=False,
             save_strategy="steps",
             evaluation_strategy="steps",
-            eval_steps=STEPS_VAL,
-            save_steps=STEPS_VAL,
+            eval_steps=config.eval_every,
+            save_steps=config.eval_every,
             metric_for_best_model="mcrmse",
             save_total_limit=1,
         )
@@ -300,11 +247,11 @@ class ClessDeberta:
             eval_dataset=val_ds,
             data_collator=self.data_collator,
             tokenizer=self.tokenizer,
-            compute_metrics=compute_mcrmse,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=10)],
+            compute_metrics=compute_mcrmse_for_trainer,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=config.patience)],
         )
         trainer.train()
-        eval_res = trainer.evaluate()
+        eval_res = trainer.predict(test_dataset=val_ds)
 
         model_fold_dir = os.path.join(
             self.dump_dir,
@@ -319,13 +266,11 @@ class ClessDeberta:
 
         return eval_res
 
-    def predict(self, df):
+    def predict_single_fold(self, df):
         config = Config(**self.model_config.cfg)
         test_ds = Dataset.from_pandas(df)
         test_ds = test_ds.map(
             tokenize,
-            batched=False,
-            num_proc=config.num_proc,
             fn_kwargs={
                 "tokenizer": self.tokenizer,
                 "config": config,
@@ -336,7 +281,7 @@ class ClessDeberta:
         model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name_or_path,
             config=self.model_config,
-            ignore_mismatched_sizes=True,
+            # ignore_mismatched_sizes=True,
         )
         model.eval()
 
@@ -356,6 +301,77 @@ class ClessDeberta:
         predictions = infer.predict(test_dataset=test_ds)
 
         return predictions
+
+
+def cless_model_ensamble_train(config):
+    fold_results = {}
+
+    for fold in range(4):
+        print(f">>> fold {fold}:")
+        cless_deberta = ClessModel(
+            model_name_or_path=config.model_name_or_path,
+        )
+        eval_res = cless_deberta.train_single_fold(
+            fold=fold,
+            config=config,
+        )
+        fold_results[fold] = eval_res
+
+    # evaluation
+    fold_results_log = {f'f{k}': v.metrics for k, v in fold_results.items()}
+    mean_metrics = {}
+    for metric in tuple(fold_results_log.values())[0].keys():
+        metric_values = []
+        for fold in fold_results_log:
+            metric_values.append(fold_results_log[fold][metric])
+        mean_metrics[metric] = np.mean(metric_values)
+
+    fold_results_log["macro"] = mean_metrics
+
+    flat_p = np.vstack([v.predictions for v in fold_results.values()])
+    flat_l = np.vstack([v.label_ids for v in fold_results.values()])
+
+    fold_results_log["micro"] = {f"test_{k}": v for k, v in compute_mcrmse_for_trainer((flat_p, flat_l)).items()}
+
+    pprint(fold_results_log)
+    if config.report_to == "wandb":
+        run = wandb.init(
+            # Set the project where this run will be logged
+            project=WandbProjects.WANDB_DEBERTA_ENSAMBLE,
+            # Track hyperparameters and run metadata
+            config=config.__dict__)
+        run.log(data=fold_results_log)
+        run.finish()
+
+    return fold_results, fold_results_log
+
+
+def cless_model_fold_predict(fold_subdir, df):
+    """For cross-validation / LGBM training"""
+    assert os.path.isdir(fold_subdir)
+    cless_deberta = ClessModel(model_name_or_path=fold_subdir)
+    fold_prediction = cless_deberta.predict_single_fold(df)
+    partial_prediction = pd.concat(
+        [
+            df["student_id"],
+            pd.DataFrame(
+                fold_prediction.predictions, columns=TARGET_LABELS, index=df.index,
+            ),
+        ],
+        axis=1,
+    )
+    return partial_prediction
+
+
+def cless_model_ensamble_predict(folds_dir, df):
+    """For submission"""
+    predictions = {}
+    for fold in range(4):
+        fold_subdir = os.path.join(folds_dir, str(fold))
+        print(fold_subdir)
+        partial_prediction = cless_model_fold_predict(fold_subdir, df)
+        predictions[fold] = partial_prediction
+    return predictions
 
 
 class Preprocessor:
@@ -479,29 +495,6 @@ class Preprocessor:
         return input_df.drop(columns=["summary_tokens", "prompt_tokens"])
 
 
-def cless_predict(folds_dir, df):
-    predictions = {}
-    for fold in range(4):
-        fold_path = os.path.join(folds_dir, str(fold))
-        print(fold_path)
-        assert os.path.isdir(fold_path)
-        cless_deberta = ClessDeberta(
-            model_name_or_path=fold_path, tmp_dir="tmp/", dump_dir="model_dumps/"
-        )
-        fold_prediction = cless_deberta.predict(df)
-        partial_submission = pd.concat(
-            [
-                df["student_id"],
-                pd.DataFrame(
-                    fold_prediction.predictions, columns=["content", "wording"]
-                ),
-            ],
-            axis=1,
-        )
-        predictions[fold] = partial_submission
-    return predictions
-
-
 def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -561,7 +554,7 @@ def train_lgbm(train, targets, drop_columns):
     wandb.init(
         config=default_params,
         reinit=True,
-        project=WANDB_LGBM_FOLDS,
+        project=WandbProjects.WANDB_LGBM_FOLDS,
     )
 
     TRAINING_COLUMNS = None
@@ -590,7 +583,7 @@ def train_lgbm(train, targets, drop_columns):
             model = lgb.train(hyperparameters,
                               num_boost_round=10000,
                               # categorical_feature = categorical_features,
-                              valid_names=['train', 'valid'],
+                              valid_names=['train_single_fold', 'valid'],
                               train_set=dtrain,
                               valid_sets=dval,
                               callbacks=[
@@ -619,7 +612,7 @@ def train_lgbm(train, targets, drop_columns):
             assert (X_eval_cv.columns == TRAINING_COLUMNS).all()
             y_eval_cv = train[train["fold"] == fold][target]
 
-            pred = model.predict(X_eval_cv)
+            pred = model.predict_single_fold(X_eval_cv)
 
             trues.extend(y_eval_cv)
             preds.extend(pred)
