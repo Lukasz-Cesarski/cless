@@ -3,7 +3,8 @@ data/**
 tmp/**
 wandb/**
 .idea/**
-
+model_dumps/**
+sandbox/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

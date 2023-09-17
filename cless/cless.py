@@ -234,6 +234,7 @@ class ClessModel:
             save_steps=config.eval_every,
             metric_for_best_model="mcrmse",
             save_total_limit=1,
+            seed=config.seed,
         )
 
         model = AutoModelForSequenceClassification.from_pretrained(
