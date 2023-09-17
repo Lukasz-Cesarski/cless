@@ -7,19 +7,62 @@ from typing import Optional
 
 import torch
 import wandb
-from cless import Config, WandbProjects, cless_model_ensamble_train
+from cless import WandbProjects, cless_model_ensamble_sweep
 from transformers import HfArgumentParser
+
+
+SWEEP_CONFIG = {
+    'method': 'random',  # grid, random
+    'metric': {
+        'name': 'micro.test_mcrmse',
+        'goal': 'minimize',
+    },
+    'parameters': {
+        'seed': {
+            'distribution': "int_uniform",
+            'min': 0,
+            'max': 1000,
+        },
+        'learning_rate': {
+            'distribution': "log_uniform_values",
+            'min': 5e-6,
+            'max': 1e-4,
+        },
+        "hidden_dropout_prob": {
+            'distribution': "log_uniform_values",
+            'min': 5e-4,
+            'max': 5e-2,
+        },
+        "attention_probs_dropout_prob": {
+            'distribution': "log_uniform_values",
+            'min': 5e-4,
+            'max': 5e-2,
+        },
+        "weight_decay": {
+            'distribution': "log_uniform_values",
+            'min': 5e-5,
+            'max': 1e-2,
+        },
+        "batch_size": {
+            'value': 8
+        },
+    },
+}
 
 
 @dataclass
 class CommandLine:
-    run_id: Optional[str] = field(
-        default="bxu2kp2l",
-        metadata={"help": "Wandb Sweep run ID"},
+    sweep_id: Optional[str] = field(
+        default=None,
+        metadata={"help": "Wandb Sweep ID. If not passed new sweep will be created."},
     )
     free_cublas: Optional[bool] = field(
         default=False,
         metadata={"help": "Suppress CUBLAS lock (this may affect experiments reproduction!)"},
+    )
+    count: Optional[int] = field(
+        default=10,
+        metadata={"help": "Number of hyperparameters search runs"},
     )
 
 if __name__ == "__main__":
@@ -50,19 +93,10 @@ if __name__ == "__main__":
 
     warnings.simplefilter("ignore")
     start = datetime.now()
-    run_id = cl.run_id
-    api = wandb.Api()
-    run = api.run(f"{WandbProjects.WANDB_DEBERTA_SWEEPS}/{run_id}")
-    config_settings = {k: v for k, v in run.config.items()}
-    config_settings["report_to"] = "wandb"
-    config = Config(
-        **{
-            k: v
-            for k, v in config_settings.items()
-            if k not in ["data_dir", "num_proc"]
-        }
-    )
-    pprint(config)
-    fold_results = cless_model_ensamble_train(config=config)
-    pprint(fold_results)
+    if cl.sweep_id is None:
+        sweep_id = wandb.sweep(SWEEP_CONFIG, project=WandbProjects.WANDB_DEBERTA_SWEEPS)
+    else:
+        sweep_id = cl.sweep_id
+
+    wandb.agent(sweep_id, cless_model_ensamble_sweep, count=cl.count)
     pprint(f"Script timer: {datetime.now() - start}")

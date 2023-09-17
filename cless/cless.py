@@ -347,6 +347,20 @@ def cless_model_ensamble_train(config):
     return fold_results, fold_results_log
 
 
+def cless_model_ensamble_sweep():
+    default_params = Config(report_to="none").__dict__
+    wandb.init(
+        config=default_params,
+        reinit=True,
+        project=WandbProjects.WANDB_DEBERTA_SWEEPS,
+    )
+    config = Config(**wandb.config)
+
+    _, fold_results_log = cless_model_ensamble_train(config)
+
+    wandb.log(fold_results_log)
+
+
 def cless_model_fold_predict(fold_subdir, df):
     """For cross-validation / LGBM training"""
     assert os.path.isdir(fold_subdir)
