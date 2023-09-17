@@ -69,6 +69,14 @@ MODEL_DUMPS_DIR = "model_dumps"
 TARGET_LABELS = ["content", "wording"]
 
 
+def get_wandb_tags():
+    if any(k.startswith("KAGGLE") for k in os.environ.keys()):
+        tags = ["kaggle_env"]
+    else:
+        tags = ["local_env"]
+    return tags
+
+
 def read_cless_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     data_home = os.environ.get(CLESS_DATA_ENV)
     if data_home is None:
@@ -182,6 +190,7 @@ class ClessModel:
                 # reinit=True,
                 project=WandbProjects.WANDB_DEBERTA_FOLDS,
                 config=config.__dict__,
+                tags=get_wandb_tags(),
             )
         set_seed(config.seed)
         self.model_config.update(
@@ -340,7 +349,9 @@ def cless_model_ensamble_train(config):
             # Set the project where this run will be logged
             project=WandbProjects.WANDB_DEBERTA_ENSAMBLE,
             # Track hyperparameters and run metadata
-            config=config.__dict__)
+            config=config.__dict__,
+            tags=get_wandb_tags(),
+        )
         run.log(data=fold_results_log)
         run.finish()
 
@@ -353,6 +364,7 @@ def cless_model_ensamble_sweep():
         config=default_params,
         reinit=True,
         project=WandbProjects.WANDB_DEBERTA_SWEEPS,
+        tags=get_wandb_tags(),
     )
     config = Config(**wandb.config)
 
@@ -570,6 +582,7 @@ def train_lgbm(train, targets, drop_columns):
         config=default_params,
         reinit=True,
         project=WandbProjects.WANDB_LGBM_FOLDS,
+        tags=get_wandb_tags(),
     )
 
     TRAINING_COLUMNS = None

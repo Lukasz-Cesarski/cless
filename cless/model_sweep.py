@@ -7,12 +7,13 @@ from typing import Optional
 
 import torch
 import wandb
-from cless import WandbProjects, cless_model_ensamble_sweep
+from cless import WandbProjects, cless_model_ensamble_sweep, get_wandb_tags
 from transformers import HfArgumentParser
 
 
 SWEEP_CONFIG = {
     'method': 'random',  # grid, random
+    'description': "|".join(get_wandb_tags()),
     'metric': {
         'name': 'micro.test_mcrmse',
         'goal': 'minimize',
@@ -61,9 +62,10 @@ class CommandLine:
         metadata={"help": "Suppress CUBLAS lock (this may affect experiments reproduction!)"},
     )
     count: Optional[int] = field(
-        default=10,
+        default=20,
         metadata={"help": "Number of hyperparameters search runs"},
     )
+
 
 if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
