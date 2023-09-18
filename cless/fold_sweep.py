@@ -1,13 +1,10 @@
-import os
-import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pprint import pprint
 from typing import Optional
 
-import torch
 import wandb
-from cless import WandbProjects, cless_model_ensamble_sweep, get_wandb_tags
+from cless import WandbProjects, get_wandb_tags, general_setup, cless_single_fold_sweep
 from transformers import HfArgumentParser
 
 
@@ -53,6 +50,9 @@ SWEEP_CONFIG = {
 
 @dataclass
 class CommandLine:
+    fold: int = field(
+        metadata={"help": "Fold to train model"},
+    )
     sweep_id: Optional[str] = field(
         default=None,
         metadata={"help": "Wandb Sweep ID. If not passed new sweep will be created."},
@@ -68,37 +68,17 @@ class CommandLine:
 
 
 if __name__ == "__main__":
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     parser = HfArgumentParser((CommandLine,))
     (cl,) = parser.parse_args_into_dataclasses()
+    general_setup(free_cublas=cl.free_cublas)
 
-    if not cl.free_cublas:
-        # deberta processing long texts is very sensitive for randomness
-        # https://pytorch.org/docs/stable/notes/randomness#avoiding-nondeterministic-algorithms
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-        torch.use_deterministic_algorithms(True)
-
-    try:
-        if any(k.startswith("KAGGLE") for k in os.environ.keys()):
-            # in kaggle environment import key from secrets
-            from kaggle_secrets import UserSecretsClient
-
-            user_secrets = UserSecretsClient()
-            key = user_secrets.get_secret("wandb_api")
-            wandb.login(key=key)
-        else:
-            # locally use env variable to pass key "export WANDB_API_KEY=...."
-            wandb.login()
-    except:
-        print("Could not log in to WandB")
-        exit(1)
-
-    warnings.simplefilter("ignore")
     start = datetime.now()
     if cl.sweep_id is None:
-        sweep_id = wandb.sweep(SWEEP_CONFIG, project=WandbProjects.WANDB_DEBERTA_SWEEPS)
+        seep_config = SWEEP_CONFIG.copy()
+        seep_config["description"] = seep_config.get("description") + f"|fold_{cl.fold}"
+        sweep_id = wandb.sweep(seep_config, project=WandbProjects.WANDB_DEBERTA_SWEEPS)
     else:
         sweep_id = cl.sweep_id
 
-    wandb.agent(sweep_id, cless_model_ensamble_sweep, count=cl.count)
+    wandb.agent(sweep_id, lambda: cless_single_fold_sweep(fold=cl.fold), count=cl.count)
     pprint(f"Script timer: {datetime.now() - start}")
