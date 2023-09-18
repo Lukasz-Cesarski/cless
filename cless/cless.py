@@ -143,7 +143,7 @@ class Config:
     seed: int = 42
     report_to: str = "wandb"
     eval_every: int = 50
-    patience: int = 10  # early stopping
+    patience: int = 1  # early stopping
 
 
 def tokenize(example, tokenizer, config, labelled=True):
@@ -217,6 +217,9 @@ class ClessModel:
         config: Config,
         fold: int,
     ):
+        if not isinstance(fold, int):
+            raise ValueError(f"Fold should be INT. Passed {fold}")
+
         if config.report_to == "wandb":
             run = wandb.init(
                 # reinit=True,
@@ -292,7 +295,7 @@ class ClessModel:
             compute_metrics=compute_mcrmse_for_trainer,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=config.patience)],
         )
-        trainer.train()
+        # trainer.train()
         eval_res = trainer.predict(test_dataset=val_ds)
 
         model_fold_dir = os.path.join(
@@ -300,6 +303,8 @@ class ClessModel:
             self.model_name_or_path.replace("/", "_"),
             f"{fold}__{eval_res.metrics['test_mcrmse']}__{datetime.now().isoformat()[:-7]}",
         )
+        print(fold, model_fold_dir)
+
         os.makedirs(model_fold_dir, exist_ok=True)
         trainer.save_model(output_dir=model_fold_dir)
         if config.report_to == "wandb":
@@ -345,9 +350,6 @@ class ClessModel:
 
 
 def cless_single_fold_training(config: Config, fold: int):
-    if not isinstance(fold, int):
-        raise ValueError(f"Fold should be INT. Passed {fold}")
-
     cless_model = ClessModel(
         model_name_or_path=config.model_name_or_path,
         )
