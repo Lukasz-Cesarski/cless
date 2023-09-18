@@ -23,7 +23,7 @@ SWEEP_CONFIG = {
         },
         'learning_rate': {
             'distribution': "log_uniform_values",
-            'min': 5e-6,
+            'min': 5e-7,
             'max': 1e-4,
         },
         "hidden_dropout_prob": {
