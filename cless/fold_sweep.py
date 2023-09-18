@@ -12,7 +12,7 @@ SWEEP_CONFIG = {
     'method': 'random',  # grid, random
     'description': "|".join(get_wandb_tags()),
     'metric': {
-        'name': 'micro.test_mcrmse',
+        'name': 'test_mcrmse',
         'goal': 'minimize',
     },
     'parameters': {
