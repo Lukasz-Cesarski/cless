@@ -67,6 +67,7 @@ CLESS_DATA_ENV_DEFAULT = "/kaggle/input/"
 TMP_DIR = "tmp"
 MODEL_DUMPS_DIR = "model_dumps"
 TARGET_LABELS = ["content", "wording"]
+PREDICTION_LABELS = [f"pred_{t}" for t in TARGET_LABELS]
 KEEP_BEST_MODELS = 2
 
 def get_wandb_tags():
@@ -384,92 +385,89 @@ def cless_single_fold_sweep(fold: int):
     wandb.log(eval_res.metrics)
 
 
-# def cless_model_ensamble_train(config: Config):
-#     fold_results = {}
-#
-#     for fold in range(4):
-#         print(f">>> fold {fold}:")
-#         cless_model = ClessModel(
-#             model_name_or_path=config.model_name_or_path,
-#         )
-#         eval_res = cless_model.train_single_fold(
-#             fold=fold,
-#             config=config,
-#         )
-#         fold_results[fold] = eval_res
-#
-#     # evaluation
-#     fold_results_log = {f'f{k}': v.metrics for k, v in fold_results.items()}
-#     mean_metrics = {}
-#     for metric in tuple(fold_results_log.values())[0].keys():
-#         metric_values = []
-#         for fold in fold_results_log:
-#             metric_values.append(fold_results_log[fold][metric])
-#         mean_metrics[metric] = np.mean(metric_values)
-#
-#     fold_results_log["macro"] = mean_metrics
-#
-#     flat_p = np.vstack([v.predictions for v in fold_results.values()])
-#     flat_l = np.vstack([v.label_ids for v in fold_results.values()])
-#
-#     fold_results_log["micro"] = {f"test_{k}": v for k, v in compute_mcrmse_for_trainer((flat_p, flat_l)).items()}
-#
-#     pprint(fold_results_log)
-#     if config.report_to == "wandb":
-#         run = wandb.init(
-#             # Set the project where this run will be logged
-#             project=WandbProjects.WANDB_DEBERTA_ENSAMBLE,
-#             # Track hyperparameters and run metadata
-#             config=asdict(config),
-#             tags=get_wandb_tags(),
-#         )
-#         run.log(data=fold_results_log)
-#         run.finish()
-#
-#     return fold_results, fold_results_log
+def cless_single_fold_predict(fold_subdir, df):
+    """For cross-validation / LGBM training"""
+    assert os.path.isdir(fold_subdir)
+    cless_deberta = ClessModel(model_name_or_path=fold_subdir)
+    fold_prediction = cless_deberta.predict_single_fold(df)
+    partial_prediction = pd.concat(
+        [
+            df["student_id"],
+            pd.DataFrame(
+                fold_prediction.predictions, columns=TARGET_LABELS, index=df.index,
+            ),
+        ],
+        axis=1,
+    )
+    return partial_prediction
 
 
-# def cless_model_ensamble_sweep():
-#     default_params = asdict(Config(report_to="none"))
-#     wandb.init(
-#         config=default_params,
-#         reinit=True,
-#         project=WandbProjects.WANDB_DEBERTA_SWEEPS,
-#         tags=get_wandb_tags(),
-#     )
-#     config = Config(**wandb.config)
-#
-#     _, fold_results_log = cless_model_ensamble_train(config)
-#
-#     wandb.log(fold_results_log)
+def gather_best_models(models_home):
+    assert os.path.isdir(models_home)
+    models_registry = {path: path.split("__") for path in os.listdir(models_home)}
+    chosen_models = {}
+
+    for fold in range(4):
+        models_registry_fold = {k: v for k, v in models_registry.items() if v[0] == str(fold)}
+        if len(models_registry_fold) == 0:
+            raise ValueError(f"Fold {fold} without any model!")
+        best_model = sorted(models_registry_fold.items(), key=lambda x: float(x[1][1]), reverse=False)[0]
+        chosen_models[fold] = os.path.join(models_home, best_model[0])
+
+    if len(chosen_models) != 4:
+        raise ValueError
+
+    return chosen_models
 
 
-# def cless_model_fold_predict(fold_subdir, df):
-#     """For cross-validation / LGBM training"""
-#     assert os.path.isdir(fold_subdir)
-#     cless_deberta = ClessModel(model_name_or_path=fold_subdir)
-#     fold_prediction = cless_deberta.predict_single_fold(df)
-#     partial_prediction = pd.concat(
-#         [
-#             df["student_id"],
-#             pd.DataFrame(
-#                 fold_prediction.predictions, columns=TARGET_LABELS, index=df.index,
-#             ),
-#         ],
-#         axis=1,
-#     )
-#     return partial_prediction
+def cless_ensamble_predict_train(models_home):
+    train_pro, test_pro, train_sum, test_sum = read_cless_data()
+    df = train_pro.merge(train_sum, on="prompt_id")
+    assert set(ID2FOLD.keys()) == set(df["prompt_id"].unique())
+    df["fold"] = df["prompt_id"].map(ID2FOLD)
+
+    chosen_models = gather_best_models(models_home)
+
+    fold_predictions = []
+    for fold in range(4):
+        df_fold = df[df["fold"] == fold]
+        fold_prediction = cless_single_fold_predict(chosen_models[fold], df_fold)
+        fold_predictions.append(fold_prediction)
+
+    df_prediction = pd.concat(fold_predictions, axis=0).rename(
+        columns={t: p for t, p in zip(TARGET_LABELS, PREDICTION_LABELS)})
+
+    df_metrics = pd.merge(df, df_prediction, on="student_id", how="inner")
+    if len(df_metrics) != len(df):
+        raise ValueError("Input vs prediction data missmatch")
+
+    metrics = compute_mcrmse_for_trainer((df_metrics[PREDICTION_LABELS].values, df_metrics[TARGET_LABELS].values))
+
+    return df_metrics, metrics
 
 
-# def cless_model_ensamble_predict(folds_dir, df):
-#     """For submission"""
-#     predictions = {}
-#     for fold in range(4):
-#         fold_subdir = os.path.join(folds_dir, str(fold))
-#         print(fold_subdir)
-#         partial_prediction = cless_model_fold_predict(fold_subdir, df)
-#         predictions[fold] = partial_prediction
-#     return predictions
+def cless_ensamble_predict_test(models_home):
+    train_pro, test_pro, train_sum, test_sum = read_cless_data()
+    df = test_pro.merge(test_sum, on="prompt_id")
+    chosen_models = gather_best_models(models_home)
+
+    # run models
+    fold_predictions = []
+    for fold in range(4):
+        fold_prediction = cless_single_fold_predict(chosen_models[fold], df)
+        fold_predictions.append(fold_prediction)
+
+    # calculate mean of folds
+    submission_targets = []
+    for target in TARGET_LABELS:
+        stacked_df = pd.concat([p[target] for p in fold_predictions], axis=1)
+        mean_df = stacked_df.mean(axis=1)
+        mean_df.name = target
+        submission_targets.append(mean_df)
+    submission_targets.append(fold_predictions[0]["student_id"])
+    submission_df = pd.concat(submission_targets, axis=1)[["student_id"] + TARGET_LABELS]
+
+    return submission_df
 
 
 # class Preprocessor:

@@ -50,6 +50,7 @@ SWEEP_CONFIG = {
 
 @dataclass
 class CommandLine:
+    #TODO consider change to folds (list input)
     fold: int = field(
         metadata={"help": "Fold to train model"},
     )
