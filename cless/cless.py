@@ -345,6 +345,9 @@ class ClessModel:
 
 
 def cless_single_fold_training(config: Config, fold: int):
+    if not isinstance(fold, int):
+        raise ValueError(f"Fold should be INT. Passed {fold}")
+
     cless_model = ClessModel(
         model_name_or_path=config.model_name_or_path,
         )
