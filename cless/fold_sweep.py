@@ -4,53 +4,51 @@ from pprint import pprint
 from typing import Optional
 
 import wandb
-from cless import WandbProjects, get_wandb_tags, general_setup, cless_single_fold_sweep
+from cless import (WandbProjects, cless_single_fold_sweep, general_setup,
+                   get_wandb_tags)
 from transformers import HfArgumentParser
 
-
 SWEEP_CONFIG = {
-    'method': 'random',  # grid, random
-    'description': "|".join(get_wandb_tags()),
-    'metric': {
-        'name': 'test_mcrmse',
-        'goal': 'minimize',
+    "method": "random",  # grid, random
+    "description": "|".join(get_wandb_tags()),
+    "metric": {
+        "name": "test_mcrmse",
+        "goal": "minimize",
     },
-    'parameters': {
-        'seed': {
-            'distribution': "int_uniform",
-            'min': 0,
-            'max': 1000,
+    "parameters": {
+        "seed": {
+            "distribution": "int_uniform",
+            "min": 0,
+            "max": 1000,
         },
-        'learning_rate': {
-            'distribution': "log_uniform_values",
-            'min': 5e-7,
-            'max': 1e-4,
+        "learning_rate": {
+            "distribution": "log_uniform_values",
+            "min": 5e-7,
+            "max": 1e-4,
         },
         "hidden_dropout_prob": {
-            'distribution': "log_uniform_values",
-            'min': 5e-4,
-            'max': 5e-2,
+            "distribution": "log_uniform_values",
+            "min": 5e-4,
+            "max": 5e-2,
         },
         "attention_probs_dropout_prob": {
-            'distribution': "log_uniform_values",
-            'min': 5e-4,
-            'max': 5e-2,
+            "distribution": "log_uniform_values",
+            "min": 5e-4,
+            "max": 5e-2,
         },
         "weight_decay": {
-            'distribution': "log_uniform_values",
-            'min': 5e-5,
-            'max': 1e-2,
+            "distribution": "log_uniform_values",
+            "min": 5e-5,
+            "max": 1e-2,
         },
-        "batch_size": {
-            'value': 8
-        },
+        "batch_size": {"value": 8},
     },
 }
 
 
 @dataclass
 class CommandLine:
-    #TODO consider change to folds (list input)
+    # TODO consider change to folds (list input)
     fold: int = field(
         metadata={"help": "Fold to train model"},
     )
@@ -60,7 +58,9 @@ class CommandLine:
     )
     free_cublas: Optional[bool] = field(
         default=False,
-        metadata={"help": "Suppress CUBLAS lock (this may affect experiments reproduction!)"},
+        metadata={
+            "help": "Suppress CUBLAS lock (this may affect experiments reproduction!)"
+        },
     )
     count: Optional[int] = field(
         default=20,
@@ -81,5 +81,10 @@ if __name__ == "__main__":
     else:
         sweep_id = cl.sweep_id
 
-    wandb.agent(sweep_id, lambda: cless_single_fold_sweep(fold=cl.fold), count=cl.count)
+    wandb.agent(
+        sweep_id,
+        lambda: cless_single_fold_sweep(fold=cl.fold),
+        count=cl.count,
+        project=WandbProjects.WANDB_DEBERTA_SWEEPS,
+    )
     pprint(f"Script timer: {datetime.now() - start}")
