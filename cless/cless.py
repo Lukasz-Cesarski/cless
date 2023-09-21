@@ -737,7 +737,7 @@ class Preprocessor:
             "difficult_words",
             "linsear_write_formula",
             "gunning_fog",
-            "text_standard",
+            # "text_standard", # output as float needed
             "fernandez_huerta",
             "szigriszt_pazos",
             "gutierrez_polini",
@@ -747,6 +747,7 @@ class Preprocessor:
         ]
         for txt_func in textstat_functions:
             input_df[txt_func] = input_df["text"].apply(getattr(textstat, txt_func))
+        input_df["text_standard"] = input_df["text"].apply(lambda x: textstat.text_standard(x, float_output=True))
 
         input_df["quotes_count"] = input_df.progress_apply(self.quotes_count, axis=1)
 
