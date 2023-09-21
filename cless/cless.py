@@ -18,18 +18,17 @@ from typing import List, Tuple
 from pathlib import Path
 from datetime import datetime
 
+import textstat
 import numpy as np
 import pandas as pd
+import spacy
 import torch
 import wandb
 from tqdm import tqdm
-from autocorrect import Speller
 from datasets import disable_progress_bar
 from datasets import Dataset
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-from nltk.tokenize.treebank import TreebankWordDetokenizer
-from spellchecker import SpellChecker
 from transformers import (AutoConfig, AutoModelForSequenceClassification,
                           AutoTokenizer, DataCollatorWithPadding,
                           EarlyStoppingCallback, Trainer, TrainingArguments,
@@ -549,11 +548,9 @@ class CPMPSpellchecker:
 
 class Preprocessor:
     def __init__(self) -> None:
-        self.twd = TreebankWordDetokenizer()
         self.STOP_WORDS = set(stopwords.words("english"))
-
-        self.speller = Speller(lang="en")
-        self.spellchecker = SpellChecker()
+        self.cpmpspellchecker = CPMPSpellchecker()
+        self.nlp = spacy.load("en_core_web_lg")
 
     def word_overlap_count(self, row):
         """intersection(prompt_text, text)"""
@@ -575,6 +572,7 @@ class Preprocessor:
         return [" ".join(ngram) for ngram in ngrams]
 
     def ngram_co_occurrence(self, row, n: int) -> int:
+        # character-level ngrams
         # Tokenize the original text and summary into words
         original_tokens = row["prompt_tokens"]
         summary_tokens = row["summary_tokens"]
@@ -596,17 +594,54 @@ class Preprocessor:
         else:
             return 0
 
-    def spelling(self, text):
+    def spelling(self, text: str) -> int:
+        words = self.cpmpspellchecker.words(text)
+        know_words = self.cpmpspellchecker.known(words)
+        unknown = [w for w in words if w not in know_words]
+        return len(unknown)
 
-        wordlist = text.split()
-        amount_miss = len(list(self.spellchecker.unknown(wordlist)))
+    def add_spelling_dictionary(self, tokens: List[str]):
+        """dictionary update for spellchecker"""
+        for t in tokens:
+            if t not in self.cpmpspellchecker.word_probs:
+                self.cpmpspellchecker.word_probs[t] = 0  # put them on the very top
 
-        return amount_miss
+    def get_lemm_tokens(self, row, column_name, remove_stop=False, remove_punct=False):
+        spacy_obj = row[column_name]
+        result = []
+        for t in spacy_obj:
+            if remove_stop and t.is_stop:
+                continue
+            if remove_punct and t.is_punct:
+                continue
+            result.append(t.lemma_)
+        return result
 
-    def add_spelling_dictionary(self, tokens: List[str]) -> List[str]:
-        """dictionary update for pyspell checker and autocorrect"""
-        self.spellchecker.word_frequency.load_words(tokens)
-        self.speller.nlp_data.update({token: 1000 for token in tokens})
+    def lemma_overlap_count(self, row):
+        prompt_lemma = self.get_lemm_tokens(row, "prompt_text_spacy", remove_stop=True, remove_punct=True)
+        summary_lemma = self.get_lemm_tokens(row, "fixed_summary_text_spacy", remove_stop=True, remove_punct=True)
+
+        return len(set(prompt_lemma).intersection(set(summary_lemma)))
+
+    def shingles_overlap(self, row, remove_stop):
+        prompt_tokens = self.get_lemm_tokens(row, "prompt_text_spacy", remove_stop=remove_stop, remove_punct=True)
+        prompt_shingles = set(zip(prompt_tokens, prompt_tokens[1:]))
+
+        summary_tokens = self.get_lemm_tokens(row, "fixed_summary_text_spacy", remove_stop=remove_stop,
+                                              remove_punct=True)
+        summary_shingles = set(zip(summary_tokens, summary_tokens[1:]))
+        res = prompt_shingles.intersection(summary_shingles)
+        return len(res)
+
+    def get_NER(self, doc):
+        BANNED_ENTITIES = {"ORDINAL", "CARDINAL", "PERCENT", "DATE", "TIME"}
+        entities = {ent.text.strip() for ent in doc.ents if ent.label_ not in BANNED_ENTITIES}
+        return entities
+
+    def ner_co_occurence(self, row):
+        prompt_ner = row["prompt_ner"]
+        summaries_ner = row["summaries_ner"]
+        return len(prompt_ner.intersection(summaries_ner))
 
     def run(
         self,
@@ -614,28 +649,40 @@ class Preprocessor:
         summaries: pd.DataFrame,
     ) -> pd.DataFrame:
 
+        ### PROMPTS ###
+
         # before merge preprocess
         prompts["prompt_tokens"] = prompts["prompt_text"].apply(
             lambda x: word_tokenize(x)
         )
         prompts["prompt_length"] = prompts["prompt_tokens"].apply(len)
-
         # Add prompt tokens into spelling checker dictionary
         prompts["prompt_tokens"].apply(lambda x: self.add_spelling_dictionary(x))
+        prompts["prompt_text_spacy"] = prompts["prompt_text"].apply(
+            lambda x: self.nlp(x)
+        )
+        prompts["prompt_ner"] = prompts["prompt_text_spacy"].apply(lambda x: self.get_NER(x))
+
+        ### SUMMARIES ###
 
         summaries["summary_tokens"] = summaries["text"].apply(
             lambda x: word_tokenize(x)
         )
         summaries["summary_length"] = summaries["summary_tokens"].apply(len)
+        # count misspelling
+        summaries["splling_err_num"] = summaries["text"].progress_apply(self.spelling)
 
         #         from IPython.core.debugger import Pdb; Pdb().set_trace()
         # fix misspelling
         summaries["fixed_summary_text"] = summaries["text"].progress_apply(
-            lambda x: self.speller(x)
+            lambda x: self.cpmpspellchecker(x)
         )
+        summaries["fixed_summary_text_spacy"] = summaries["fixed_summary_text"].progress_apply(
+            lambda x: self.nlp(x)
+        )
+        summaries["summaries_ner"] = summaries["fixed_summary_text_spacy"].apply(lambda x: self.get_NER(x))
 
-        # count misspelling
-        summaries["splling_err_num"] = summaries["text"].progress_apply(self.spelling)
+        ### MERGED ###
 
         # merge prompts and summaries
         input_df = summaries.merge(prompts, how="left", on="prompt_id")
@@ -644,29 +691,70 @@ class Preprocessor:
         input_df["length_ratio"] = (
             input_df["summary_length"] / input_df["prompt_length"]
         )
-
         input_df["word_overlap_count"] = input_df.progress_apply(
             self.word_overlap_count, axis=1
         )
+        input_df["lemma_overlap_count"] = input_df.progress_apply(
+            self.lemma_overlap_count, axis=1
+        )
+        # ngrams (char level)
         input_df["bigram_overlap_count"] = input_df.progress_apply(
             self.ngram_co_occurrence, args=(2,), axis=1
         )
         input_df["bigram_overlap_ratio"] = input_df["bigram_overlap_count"] / (
             input_df["summary_length"] - 1
         )
-
         input_df["trigram_overlap_count"] = input_df.progress_apply(
             self.ngram_co_occurrence, args=(3,), axis=1
         )
         input_df["trigram_overlap_ratio"] = input_df["trigram_overlap_count"] / (
             input_df["summary_length"] - 2
         )
+        # shingle (word level)
+        input_df["shingle_overlap_stop_on"] = input_df.progress_apply(
+            lambda x: self.shingles_overlap(x, remove_stop=False), axis=1
+        )
+        input_df["shingle_overlap_stop_on_ratio"] = input_df["shingle_overlap_stop_on"] / (
+                input_df["summary_length"] - 1
+        )
+        input_df["shingle_overlap_stop_off"] = input_df.progress_apply(
+            lambda x: self.shingles_overlap(x, remove_stop=True), axis=1
+        )
+        input_df["shingle_overlap_stop_off_ratio"] = input_df["shingle_overlap_stop_off"] / (
+                input_df["summary_length"] - 1
+        )
+        input_df["ner_co_occurence"] = input_df.apply(
+            self.ner_co_occurence, axis=1
+        )
+
+        textstat_functions = [
+            "flesch_reading_ease",
+            "flesch_kincaid_grade",
+            "smog_index",
+            "coleman_liau_index",
+            "automated_readability_index",
+            "dale_chall_readability_score",
+            "difficult_words",
+            "linsear_write_formula",
+            "gunning_fog",
+            "text_standard",
+            "fernandez_huerta",
+            "szigriszt_pazos",
+            "gutierrez_polini",
+            "crawford",
+            "gulpease_index",
+            "osman",
+        ]
+        for txt_func in textstat_functions:
+            input_df[txt_func] = input_df["text"].apply(getattr(textstat, txt_func))
 
         input_df["quotes_count"] = input_df.progress_apply(self.quotes_count, axis=1)
 
         input_df["fold"] = input_df["prompt_id"].map(ID2FOLD)
 
-        return input_df.drop(columns=["summary_tokens", "prompt_tokens"])
+        drop_columns = ["summary_tokens", "prompt_tokens"]
+
+        return input_df.drop(columns=drop_columns)
 
 
 def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
