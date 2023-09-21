@@ -75,9 +75,9 @@ if __name__ == "__main__":
 
     start = datetime.now()
     if cl.sweep_id is None:
-        seep_config = SWEEP_CONFIG.copy()
-        seep_config["description"] = seep_config.get("description") + f"|fold_{cl.fold}"
-        sweep_id = wandb.sweep(seep_config, project=WandbProjects.WANDB_DEBERTA_SWEEPS)
+        sweep_config = SWEEP_CONFIG.copy()
+        sweep_config["description"] = sweep_config.get("description") + f"|fold_{cl.fold}"
+        sweep_id = wandb.sweep(sweep_config, project=WandbProjects.WANDB_DEBERTA_SWEEPS)
     else:
         sweep_id = cl.sweep_id
 

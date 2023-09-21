@@ -8,13 +8,12 @@ This file stores essential parts of code to
 - paste it in kaggle notebook (use magic `%%writefile cless.py` command)
 - easy code development (code refactor, black, import sort)
 """
-
+import json
 import os
 import re
 import shutil
 import warnings
 from dataclasses import dataclass, asdict
-from pprint import pprint
 from typing import List, Tuple
 from pathlib import Path
 from datetime import datetime
@@ -472,6 +471,82 @@ def cless_ensamble_predict_test(models_home):
     return submission_df
 
 
+class CPMPSpellchecker:
+    """
+    All credits goes for:
+    https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries/discussion/433451
+    https://www.kaggle.com/code/atamazian/spell-checker-using-word2vec-updated-work-by-cpmp/notebook
+    https://www.kaggle.com/code/cpmpml/spell-checker-using-word2vec
+    """
+
+    def __init__(self, words_path=None):
+        if words_path is None:
+            data_home = os.environ.get(CLESS_DATA_ENV)
+            if data_home is None:
+                # default kaggle location
+                data_home = CLESS_DATA_ENV_DEFAULT
+            data_home = Path(data_home)
+            if not data_home.is_dir():
+                raise FileNotFoundError(f"Directory not found! {data_home}")
+
+            word_probs_path = data_home / "word-probs" / "word_probs.json"
+        else:
+            word_probs_path = words_path
+
+        assert word_probs_path.exists()
+
+        with open(word_probs_path) as fr:
+            word_probs = json.load(fr)
+        self.word_probs = word_probs
+
+    @staticmethod
+    def words(text):
+        return re.findall(r'\w+', text)
+
+    def P(self, word):
+        "Probability of `word`."
+        # use inverse of rank as proxy
+        # returns 0 if the word isn't in the dictionary
+        return - self.word_probs.get(word, 0)
+
+    def correction(self, word):
+        "Most probable spelling correction for word."
+        return max(self.candidates(word), key=self.P)
+
+    def candidates(self, word):
+        "Generate possible spelling corrections for word."
+        return (self.known([word]) or self.known(self.edits1(word)) or self.known(self.edits2(word)) or [word])
+
+    def known(self, words):
+        "The subset of `words` that appear in the dictionary of WORDS."
+        return set(w for w in words if w in self.word_probs)
+
+    @staticmethod
+    def edits1(word):
+        "All edits that are one edit away from `word`."
+        letters = 'abcdefghijklmnopqrstuvwxyz'
+        splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
+        deletes = [L + R[1:] for L, R in splits if R]
+        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
+        replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
+        inserts = [L + c + R for L, R in splits for c in letters]
+        return set(deletes + transposes + replaces + inserts)
+
+    def edits2(self, word):
+        "All edits that are two edits away from `word`."
+        return (e2 for e1 in self.edits1(word) for e2 in self.edits1(e1))
+
+    def __call__(self, text):
+        words = self.words(text)
+        known_words = self.known(words)
+        swap_dict = {w: self.correction(w) for w in words if w not in known_words}
+
+        correct_text = text
+        for incor_w, corr_w in swap_dict.items():
+            correct_text = re.sub(r"\b{}\b".format(re.escape(incor_w)), corr_w, correct_text)
+        return correct_text
+
+
 class Preprocessor:
     def __init__(self) -> None:
         self.twd = TreebankWordDetokenizer()
@@ -544,13 +619,14 @@ class Preprocessor:
             lambda x: word_tokenize(x)
         )
         prompts["prompt_length"] = prompts["prompt_tokens"].apply(len)
+
+        # Add prompt tokens into spelling checker dictionary
+        prompts["prompt_tokens"].apply(lambda x: self.add_spelling_dictionary(x))
+
         summaries["summary_tokens"] = summaries["text"].apply(
             lambda x: word_tokenize(x)
         )
         summaries["summary_length"] = summaries["summary_tokens"].apply(len)
-
-        # Add prompt tokens into spelling checker dictionary
-        prompts["prompt_tokens"].apply(lambda x: self.add_spelling_dictionary(x))
 
         #         from IPython.core.debugger import Pdb; Pdb().set_trace()
         # fix misspelling

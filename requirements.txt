@@ -30,3 +30,4 @@ nltk
 autocorrect
 pyspellchecker
 lightgbm
+gensim
