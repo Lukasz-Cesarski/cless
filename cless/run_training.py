@@ -40,5 +40,4 @@ if __name__ == "__main__":
     )
     pprint(config)
     fold_results, fold_results_log, new_dump_dir = cless_ensamble_train(config=config)
-    pprint(fold_results.metrics)
     pprint(f"Script timer: {datetime.now() - start}")
