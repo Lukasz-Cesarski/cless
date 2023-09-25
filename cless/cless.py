@@ -8,33 +8,41 @@ This file stores essential parts of code to
 - paste it in kaggle notebook (use magic `%%writefile cless.py` command)
 - easy code development (code refactor, black, import sort)
 """
+import gc
 import json
 import os
 import re
 import shutil
 import warnings
-from dataclasses import dataclass, asdict
-from typing import List, Tuple
-from pathlib import Path
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
+from pprint import pprint
+from typing import List, Optional, Tuple
 
-import textstat
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import spacy
+import textstat
 import torch
 import wandb
-from tqdm import tqdm
-from datasets import disable_progress_bar
-from datasets import Dataset
+from datasets import Dataset, disable_progress_bar
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-from transformers import (AutoConfig, AutoModelForSequenceClassification,
-                          AutoTokenizer, DataCollatorWithPadding,
-                          EarlyStoppingCallback, Trainer, TrainingArguments,
-                          set_seed)
-import lightgbm as lgb
 from sklearn.metrics import mean_squared_error
+from tqdm import tqdm
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+    EarlyStoppingCallback,
+    Trainer,
+    TrainingArguments,
+    set_seed,
+)
+
 
 class Files:
     PRO_TRAIN_FILE = "prompts_train.csv"
@@ -52,6 +60,7 @@ class WandbProjects:
     WANDB_LGBM_ENSAMBLE = "cless-lgbm-ensamble"
     WANDB_LGBM_SWEEPS = "cless-lgbm-sweeps"
 
+
 ID2FOLD = {
     "814d6b": 0,
     "39c16e": 1,
@@ -68,6 +77,7 @@ TARGET_LABELS = ["content", "wording"]
 PREDICTION_LABELS = [f"pred_{t}" for t in TARGET_LABELS]
 KEEP_BEST_MODELS = 2
 
+
 def get_wandb_tags():
     if any(k.startswith("KAGGLE") for k in os.environ.keys()):
         tags = ["kaggle_env"]
@@ -81,14 +91,14 @@ def general_setup(free_cublas=False, internet_connection=True):
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tqdm.pandas()  # for processor
     disable_progress_bar()
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     if not free_cublas:
         # deberta processing long texts is very sensitive for randomness
         # https://pytorch.org/docs/stable/notes/randomness#avoiding-nondeterministic-algorithms
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.use_deterministic_algorithms(True)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
     try:
         if any(k.startswith("KAGGLE") for k in os.environ.keys()):
@@ -132,6 +142,7 @@ def read_cless_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Data
 @dataclass
 class Config:
     model_name_or_path: str = "microsoft/deberta-v3-base"
+    # model_name_or_path: str = "microsoft/deberta-v3-large"
     max_seq_length: int = 512
     add_prompt_question: bool = False
     add_prompt_text: bool = False
@@ -139,12 +150,20 @@ class Config:
     attention_probs_dropout_prob: float = 0.05
     learning_rate: float = 5e-05
     weight_decay: float = 0.0
-    batch_size: int = 8
+    batch_size: int = 6
     num_train_epochs: int = 3
     seed: int = 42
     report_to: str = "wandb"
     eval_every: int = 50
     patience: int = 10  # early stopping
+    fp16: Optional[bool] = None
+
+    def __post_init__(self):
+        if self.fp16 is None:
+            if "large" in self.model_name_or_path:
+                self.fp16 = True
+            else:
+                self.fp16 = False
 
 
 def tokenize(example, tokenizer, config, labelled=True):
@@ -195,7 +214,7 @@ class ClessModel:
     def __init__(
         self,
         model_name_or_path: str,
-        tmp_dir: str = TMP_DIR ,
+        tmp_dir: str = TMP_DIR,
         dump_dir: str = MODEL_DUMPS_DIR,
     ):
         self.model_name_or_path = model_name_or_path
@@ -280,6 +299,7 @@ class ClessModel:
             metric_for_best_model="mcrmse",
             save_total_limit=1,
             seed=config.seed,
+            fp16=config.fp16,
         )
 
         model = AutoModelForSequenceClassification.from_pretrained(
@@ -299,18 +319,14 @@ class ClessModel:
         trainer.train()
         eval_res = trainer.predict(test_dataset=val_ds)
 
-        model_fold_dir = os.path.join(
-            self.dump_dir,
-            self.model_name_or_path.replace("/", "_"),
-            f"{fold}__{eval_res.metrics['test_mcrmse']}__{datetime.now().isoformat()[:-7]}",
-        )
+        model_fold_dir = os.path.join(self.dump_dir, str(fold))
         os.makedirs(model_fold_dir, exist_ok=True)
         trainer.save_model(output_dir=model_fold_dir)
         if config.report_to == "wandb":
             run.finish()
         shutil.rmtree(self.tmp_dir)
 
-        return eval_res, model_fold_dir
+        return eval_res
 
     def predict_single_fold(self, df):
         config = Config(**self.model_config.cfg)
@@ -348,30 +364,82 @@ class ClessModel:
         return predictions
 
 
-def cless_single_fold_training(config: Config, fold: int):
-    cless_model = ClessModel(
-        model_name_or_path=config.model_name_or_path,
-        )
-    eval_res, model_fold_dir = cless_model.train_single_fold(
-        fold=fold,
-        config=config,
+def cless_ensamble_train(config: Config):
+    fold_results = {}
+    ensamble_start = datetime.now().isoformat()[:-7]
+    dump_dir = os.path.join(
+        MODEL_DUMPS_DIR,
+        config.model_name_or_path.replace("/", "_"),
+        ensamble_start,
     )
-    # leave only best experiments
-    models_home = os.path.dirname(model_fold_dir)
-    models_registry = {path: path.split("__") for path in os.listdir(models_home)}
+
     for fold in range(4):
-        models_registry_fold = {k: v for k, v in models_registry.items() if v[0] == str(fold)}
-        models_registry_fold_remove = sorted(models_registry_fold.items(), key=lambda x: float(x[1][1]), reverse=False)[
-                                      KEEP_BEST_MODELS:]
-        for dir_name, _ in models_registry_fold_remove:
-            full_dir_name = os.path.join(models_home, dir_name)
-            shutil.rmtree(full_dir_name)
+        cless_model = ClessModel(
+            model_name_or_path=config.model_name_or_path, dump_dir=dump_dir
+        )
+        eval_res = cless_model.train_single_fold(
+            fold=fold,
+            config=config,
+        )
+        torch.cuda.empty_cache()
+        gc.collect()
 
-    return eval_res
+        fold_results[fold] = eval_res
+
+        print(f">>> Training fold {fold}:")
+        cless_model = ClessModel(
+            model_name_or_path=config.model_name_or_path,
+        )
+        eval_res = cless_model.train_single_fold(
+            fold=fold,
+            config=config,
+        )
+        fold_results[fold] = eval_res
+
+    # evaluation
+    fold_results_log = {f"f{k}": v.metrics for k, v in fold_results.items()}
+    mean_metrics = {}
+    for metric in tuple(fold_results_log.values())[0].keys():
+        metric_values = []
+        for fold in fold_results_log:
+            metric_values.append(fold_results_log[fold][metric])
+        mean_metrics[metric] = np.mean(metric_values)
+
+    fold_results_log["macro"] = mean_metrics
+
+    flat_p = np.vstack([v.predictions for v in fold_results.values()])
+    flat_l = np.vstack([v.label_ids for v in fold_results.values()])
+
+    fold_results_log["micro"] = {
+        f"test_{k}": v for k, v in compute_mcrmse_for_trainer((flat_p, flat_l)).items()
+    }
+    pprint(fold_results_log)
+    if config.report_to == "wandb":
+        run = wandb.init(
+            # Set the project where this run will be logged
+            project=WandbProjects.WANDB_DEBERTA_ENSAMBLE,
+            # Track hyperparameters and run metadata
+            config=asdict(config),
+            tags=get_wandb_tags(),
+        )
+        run.log(data=fold_results_log)
+        run.finish()
+
+    new_dump_dir = os.path.join(
+        os.path.dirname(dump_dir),
+        str(fold_results_log["micro"]["test_mcrmse"])
+        + "__"
+        + os.path.basename(dump_dir),
+    )
+
+    os.rename(dump_dir, new_dump_dir)
+
+    return fold_results, fold_results_log, new_dump_dir
 
 
-def cless_single_fold_sweep(fold: int):
-    default_params = asdict(Config(report_to="none"))
+def cless_ensamble_sweep(cli_config: Config):
+    cli_config.report_to = "none"
+    default_params = asdict(cli_config)
     wandb.init(
         config=default_params,
         reinit=True,
@@ -380,9 +448,22 @@ def cless_single_fold_sweep(fold: int):
     )
     config = Config(**wandb.config)
 
-    eval_res = cless_single_fold_training(config=config, fold=fold)
+    fold_results, fold_results_log, new_dump_dir = cless_ensamble_train(
+        config=config
+    )
 
-    wandb.log(eval_res.metrics)
+    wandb.log(fold_results_log)
+
+    # remove additional directories (worst runs)
+    models_home = os.path.dirname(new_dump_dir)
+    models_registry = {path: path.split("__") for path in os.listdir(models_home)}
+    models_registry_fold_remove = sorted(
+        models_registry.items(), key=lambda x: float(x[1][0]), reverse=False
+    )[KEEP_BEST_MODELS:]
+
+    for dir_name, _ in models_registry_fold_remove:
+        full_dir_name = os.path.join(models_home, dir_name)
+        shutil.rmtree(full_dir_name)
 
 
 def cless_single_fold_predict(fold_subdir, df):
@@ -394,30 +475,14 @@ def cless_single_fold_predict(fold_subdir, df):
         [
             df["student_id"],
             pd.DataFrame(
-                fold_prediction.predictions, columns=TARGET_LABELS, index=df.index,
+                fold_prediction.predictions,
+                columns=TARGET_LABELS,
+                index=df.index,
             ),
         ],
         axis=1,
     )
     return partial_prediction
-
-
-def gather_best_models(models_home):
-    assert os.path.isdir(models_home)
-    models_registry = {path: path.split("__") for path in os.listdir(models_home)}
-    chosen_models = {}
-
-    for fold in range(4):
-        models_registry_fold = {k: v for k, v in models_registry.items() if v[0] == str(fold)}
-        if len(models_registry_fold) == 0:
-            raise ValueError(f"Fold {fold} without any model!")
-        best_model = sorted(models_registry_fold.items(), key=lambda x: float(x[1][1]), reverse=False)[0]
-        chosen_models[fold] = os.path.join(models_home, best_model[0])
-
-    if len(chosen_models) != 4:
-        raise ValueError
-
-    return chosen_models
 
 
 def cless_ensamble_predict_train(models_home):
@@ -426,22 +491,24 @@ def cless_ensamble_predict_train(models_home):
     assert set(ID2FOLD.keys()) == set(df["prompt_id"].unique())
     df["fold"] = df["prompt_id"].map(ID2FOLD)
 
-    chosen_models = gather_best_models(models_home)
-
     fold_predictions = []
     for fold in range(4):
+        fold_subdir = os.path.join(models_home, str(fold))
         df_fold = df[df["fold"] == fold]
-        fold_prediction = cless_single_fold_predict(chosen_models[fold], df_fold)
+        fold_prediction = cless_single_fold_predict(fold_subdir, df_fold)
         fold_predictions.append(fold_prediction)
 
     df_prediction = pd.concat(fold_predictions, axis=0).rename(
-        columns={t: p for t, p in zip(TARGET_LABELS, PREDICTION_LABELS)})
+        columns={t: p for t, p in zip(TARGET_LABELS, PREDICTION_LABELS)}
+    )
 
     df_metrics = pd.merge(df, df_prediction, on="student_id", how="inner")
     if len(df_metrics) != len(df):
         raise ValueError("Input vs prediction data missmatch")
 
-    metrics = compute_mcrmse_for_trainer((df_metrics[PREDICTION_LABELS].values, df_metrics[TARGET_LABELS].values))
+    metrics = compute_mcrmse_for_trainer(
+        (df_metrics[PREDICTION_LABELS].values, df_metrics[TARGET_LABELS].values)
+    )
 
     return df_metrics, metrics
 
@@ -449,12 +516,12 @@ def cless_ensamble_predict_train(models_home):
 def cless_ensamble_predict_test(models_home):
     train_pro, test_pro, train_sum, test_sum = read_cless_data()
     df = test_pro.merge(test_sum, on="prompt_id")
-    chosen_models = gather_best_models(models_home)
 
     # run models
     fold_predictions = []
     for fold in range(4):
-        fold_prediction = cless_single_fold_predict(chosen_models[fold], df)
+        fold_subdir = os.path.join(models_home, str(fold))
+        fold_prediction = cless_single_fold_predict(fold_subdir, df)
         fold_predictions.append(fold_prediction)
 
     # calculate mean of folds
@@ -465,7 +532,9 @@ def cless_ensamble_predict_test(models_home):
         mean_df.name = target
         submission_targets.append(mean_df)
     submission_targets.append(fold_predictions[0]["student_id"])
-    submission_df = pd.concat(submission_targets, axis=1)[["student_id"] + TARGET_LABELS]
+    submission_df = pd.concat(submission_targets, axis=1)[
+        ["student_id"] + TARGET_LABELS
+    ]
 
     return submission_df
 
@@ -500,13 +569,13 @@ class CPMPSpellchecker:
 
     @staticmethod
     def words(text):
-        return re.findall(r'\w+', text)
+        return re.findall(r"\w+", text)
 
     def P(self, word):
         "Probability of `word`."
         # use inverse of rank as proxy
         # returns 0 if the word isn't in the dictionary
-        return - self.word_probs.get(word, 0)
+        return -self.word_probs.get(word, 0)
 
     def correction(self, word):
         "Most probable spelling correction for word."
@@ -514,7 +583,12 @@ class CPMPSpellchecker:
 
     def candidates(self, word):
         "Generate possible spelling corrections for word."
-        return (self.known([word]) or self.known(self.edits1(word)) or self.known(self.edits2(word)) or [word])
+        return (
+            self.known([word])
+            or self.known(self.edits1(word))
+            or self.known(self.edits2(word))
+            or [word]
+        )
 
     def known(self, words):
         "The subset of `words` that appear in the dictionary of WORDS."
@@ -523,7 +597,7 @@ class CPMPSpellchecker:
     @staticmethod
     def edits1(word):
         "All edits that are one edit away from `word`."
-        letters = 'abcdefghijklmnopqrstuvwxyz'
+        letters = "abcdefghijklmnopqrstuvwxyz"
         splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
         deletes = [L + R[1:] for L, R in splits if R]
         transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
@@ -542,7 +616,9 @@ class CPMPSpellchecker:
 
         correct_text = text
         for incor_w, corr_w in swap_dict.items():
-            correct_text = re.sub(r"\b{}\b".format(re.escape(incor_w)), corr_w, correct_text)
+            correct_text = re.sub(
+                r"\b{}\b".format(re.escape(incor_w)), corr_w, correct_text
+            )
         return correct_text
 
 
@@ -618,24 +694,33 @@ class Preprocessor:
         return result
 
     def lemma_overlap_count(self, row):
-        prompt_lemma = self.get_lemm_tokens(row, "prompt_text_spacy", remove_stop=True, remove_punct=True)
-        summary_lemma = self.get_lemm_tokens(row, "fixed_summary_text_spacy", remove_stop=True, remove_punct=True)
+        prompt_lemma = self.get_lemm_tokens(
+            row, "prompt_text_spacy", remove_stop=True, remove_punct=True
+        )
+        summary_lemma = self.get_lemm_tokens(
+            row, "fixed_summary_text_spacy", remove_stop=True, remove_punct=True
+        )
 
         return len(set(prompt_lemma).intersection(set(summary_lemma)))
 
     def shingles_overlap(self, row, remove_stop):
-        prompt_tokens = self.get_lemm_tokens(row, "prompt_text_spacy", remove_stop=remove_stop, remove_punct=True)
+        prompt_tokens = self.get_lemm_tokens(
+            row, "prompt_text_spacy", remove_stop=remove_stop, remove_punct=True
+        )
         prompt_shingles = set(zip(prompt_tokens, prompt_tokens[1:]))
 
-        summary_tokens = self.get_lemm_tokens(row, "fixed_summary_text_spacy", remove_stop=remove_stop,
-                                              remove_punct=True)
+        summary_tokens = self.get_lemm_tokens(
+            row, "fixed_summary_text_spacy", remove_stop=remove_stop, remove_punct=True
+        )
         summary_shingles = set(zip(summary_tokens, summary_tokens[1:]))
         res = prompt_shingles.intersection(summary_shingles)
         return len(res)
 
     def get_NER(self, doc):
         BANNED_ENTITIES = {"ORDINAL", "CARDINAL", "PERCENT", "DATE", "TIME"}
-        entities = {ent.text.strip() for ent in doc.ents if ent.label_ not in BANNED_ENTITIES}
+        entities = {
+            ent.text.strip() for ent in doc.ents if ent.label_ not in BANNED_ENTITIES
+        }
         return entities
 
     def ner_co_occurence(self, row):
@@ -661,7 +746,9 @@ class Preprocessor:
         prompts["prompt_text_spacy"] = prompts["prompt_text"].apply(
             lambda x: self.nlp(x)
         )
-        prompts["prompt_ner"] = prompts["prompt_text_spacy"].apply(lambda x: self.get_NER(x))
+        prompts["prompt_ner"] = prompts["prompt_text_spacy"].apply(
+            lambda x: self.get_NER(x)
+        )
 
         ### SUMMARIES ###
 
@@ -677,10 +764,12 @@ class Preprocessor:
         summaries["fixed_summary_text"] = summaries["text"].progress_apply(
             lambda x: self.cpmpspellchecker(x)
         )
-        summaries["fixed_summary_text_spacy"] = summaries["fixed_summary_text"].progress_apply(
-            lambda x: self.nlp(x)
+        summaries["fixed_summary_text_spacy"] = summaries[
+            "fixed_summary_text"
+        ].progress_apply(lambda x: self.nlp(x))
+        summaries["summaries_ner"] = summaries["fixed_summary_text_spacy"].apply(
+            lambda x: self.get_NER(x)
         )
-        summaries["summaries_ner"] = summaries["fixed_summary_text_spacy"].apply(lambda x: self.get_NER(x))
 
         ### MERGED ###
 
@@ -714,18 +803,16 @@ class Preprocessor:
         input_df["shingle_overlap_stop_on"] = input_df.progress_apply(
             lambda x: self.shingles_overlap(x, remove_stop=False), axis=1
         )
-        input_df["shingle_overlap_stop_on_ratio"] = input_df["shingle_overlap_stop_on"] / (
-                input_df["summary_length"] - 1
-        )
+        input_df["shingle_overlap_stop_on_ratio"] = input_df[
+            "shingle_overlap_stop_on"
+        ] / (input_df["summary_length"] - 1)
         input_df["shingle_overlap_stop_off"] = input_df.progress_apply(
             lambda x: self.shingles_overlap(x, remove_stop=True), axis=1
         )
-        input_df["shingle_overlap_stop_off_ratio"] = input_df["shingle_overlap_stop_off"] / (
-                input_df["summary_length"] - 1
-        )
-        input_df["ner_co_occurence"] = input_df.apply(
-            self.ner_co_occurence, axis=1
-        )
+        input_df["shingle_overlap_stop_off_ratio"] = input_df[
+            "shingle_overlap_stop_off"
+        ] / (input_df["summary_length"] - 1)
+        input_df["ner_co_occurence"] = input_df.apply(self.ner_co_occurence, axis=1)
 
         textstat_functions = [
             "flesch_reading_ease",
@@ -747,7 +834,9 @@ class Preprocessor:
         ]
         for txt_func in textstat_functions:
             input_df[txt_func] = input_df["text"].apply(getattr(textstat, txt_func))
-        input_df["text_standard"] = input_df["text"].apply(lambda x: textstat.text_standard(x, float_output=True))
+        input_df["text_standard"] = input_df["text"].apply(
+            lambda x: textstat.text_standard(x, float_output=True)
+        )
 
         input_df["quotes_count"] = input_df.progress_apply(self.quotes_count, axis=1)
 
@@ -779,17 +868,20 @@ def train_lgbm(train, targets, drop_columns):
     # https://colab.research.google.com/drive/181GCGp36_75C2zm7WLxr9U2QjMXXoibt#scrollTo=aIhxl7glaJ5k
     # defaults
     default_params = {
-        'random_state': 42,
-        'objective': 'regression',
-        'metric': 'rmse',
-        'learning_rate': 0.05,
-        'boosting': "gbdt",
-        'num_leaves': 31,
-        'max_depth': -1,
-        'min_data_in_leaf': 20,
-        'min_data_in_bin': 3,
-        'lambda_l1': 0.0,
-        'lambda_l2': 0.0,
+        "random_state": 42,
+        "objective": "regression",
+        "metric": "rmse",
+        "learning_rate": 0.1,  # ---sweep
+        "boosting": "gbdt",
+        "num_leaves": 31,  # ---sweep
+        "max_depth": -1,  # ---sweep
+        "min_data_in_leaf": 10,  # ---sweep
+        "min_data_in_bin": 5,  # like in OLD
+        "lambda_l1": 0.0,  # default
+        "lambda_l2": 0.0,  # default
+        "max_bin": 127,  # takie mid
+        "feature_fraction": 1.0,  # check
+        "bagging_fraction": 1.0,  # check
     }
     # Initialize a new wandb run
     wandb.init(
@@ -820,21 +912,22 @@ def train_lgbm(train, targets, drop_columns):
 
             evaluation_results = {}
             # deepcopy may cause MaxRecursionException
-            hyperparameters = {k:v for k, v in wandb.config.items()}
+            hyperparameters = {k: v for k, v in wandb.config.items()}
 
-            model = lgb.train(hyperparameters,
-                              num_boost_round=10000,
-                              # categorical_feature = categorical_features,
-                              valid_names=['train_single_fold', 'valid'],
-                              train_set=dtrain,
-                              valid_sets=dval,
-                              callbacks=[
-                                  lgb.early_stopping(stopping_rounds=30, verbose=True),
-                                  lgb.log_evaluation(100),
-                                  lgb.callback.record_evaluation(evaluation_results),
-                                  # wandb_callback(),
-                              ],
-                              )
+            model = lgb.train(
+                hyperparameters,
+                num_boost_round=10000,
+                # categorical_feature = categorical_features,
+                valid_names=["train_single_fold", "valid"],
+                train_set=dtrain,
+                valid_sets=dval,
+                callbacks=[
+                    lgb.early_stopping(stopping_rounds=30, verbose=True),
+                    lgb.log_evaluation(100),
+                    lgb.callback.record_evaluation(evaluation_results),
+                    # wandb_callback(),
+                ],
+            )
             # log_summary(model, save_model_checkpoint=True)
             models.append(model)
 

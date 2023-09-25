@@ -4,17 +4,14 @@ from pprint import pprint
 from typing import Optional
 
 import wandb
-from cless import Config, WandbProjects, general_setup, cless_single_fold_training
+from cless import Config, WandbProjects, general_setup, cless_ensamble_train
 from transformers import HfArgumentParser
 
 
 @dataclass
 class CommandLine:
-    fold: int = field(
-        metadata={"help": "Fold to train model"},
-    )
     run_id: Optional[str] = field(
-        default="bxu2kp2l",
+        default="wfx04u5o",
         metadata={"help": "Wandb Sweep run ID to get parameters"},
     )
     free_cublas: Optional[bool] = field(
@@ -42,6 +39,6 @@ if __name__ == "__main__":
         }
     )
     pprint(config)
-    eval_res = cless_single_fold_training(config=config, fold=cl.fold)
-    pprint(eval_res.metrics)
+    fold_results, fold_results_log, new_dump_dir = cless_ensamble_train(config=config)
+    pprint(fold_results.metrics)
     pprint(f"Script timer: {datetime.now() - start}")
