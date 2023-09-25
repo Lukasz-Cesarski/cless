@@ -83,7 +83,7 @@ SWEEP_CONFIG_LARGE = {
             "min": 5e-5,
             "max": 1e-2,
         },
-        "batch_size": {"values": [4, 6]},
+        "batch_size": {"value": 6},
     },
 }
 
