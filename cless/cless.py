@@ -75,7 +75,7 @@ TMP_DIR = "tmp"
 MODEL_DUMPS_DIR = "model_dumps"
 TARGET_LABELS = ["content", "wording"]
 PREDICTION_LABELS = [f"pred_{t}" for t in TARGET_LABELS]
-KEEP_BEST_MODELS = 2
+KEEP_BEST_MODELS = 3
 
 
 def get_wandb_tags():
