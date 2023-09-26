@@ -65,7 +65,7 @@ SWEEP_CONFIG_LARGE = {
         },
         "learning_rate": {
             "distribution": "log_uniform_values",
-            "min": 5e-7,
+            "min": 1e-6,
             "max": 5e-5,
         },
         "hidden_dropout_prob": {

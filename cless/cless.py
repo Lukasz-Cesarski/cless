@@ -374,6 +374,7 @@ def cless_ensamble_train(config: Config):
     )
 
     for fold in range(4):
+        print(f">>> Training fold {fold}:")
         cless_model = ClessModel(
             model_name_or_path=config.model_name_or_path, dump_dir=dump_dir
         )
@@ -384,16 +385,6 @@ def cless_ensamble_train(config: Config):
         torch.cuda.empty_cache()
         gc.collect()
 
-        fold_results[fold] = eval_res
-
-        print(f">>> Training fold {fold}:")
-        cless_model = ClessModel(
-            model_name_or_path=config.model_name_or_path,
-        )
-        eval_res = cless_model.train_single_fold(
-            fold=fold,
-            config=config,
-        )
         fold_results[fold] = eval_res
 
     # evaluation
