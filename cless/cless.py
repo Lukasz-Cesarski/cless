@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from pprint import pprint
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import lightgbm as lgb
 import numpy as np
@@ -33,6 +33,7 @@ from nltk.tokenize import word_tokenize
 from sklearn.metrics import mean_squared_error
 from tqdm import tqdm
 from transformers import (
+    pipeline,
     AutoConfig,
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -76,6 +77,7 @@ MODEL_DUMPS_DIR = "model_dumps"
 TARGET_LABELS = ["content", "wording"]
 PREDICTION_LABELS = [f"pred_{t}" for t in TARGET_LABELS]
 KEEP_BEST_MODELS = 3
+SUMMARIZATION_CACHE_FILE = "summarization-cache/summarization_cache.json"
 
 
 def get_wandb_tags():
@@ -120,7 +122,7 @@ def general_setup(free_cublas=False, internet_connection=True):
         exit(1)
 
 
-def read_cless_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def read_cless_data(short_prompts=True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     data_home = os.environ.get(CLESS_DATA_ENV)
     if data_home is None:
         # default kaggle location
@@ -136,6 +138,10 @@ def read_cless_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Data
     train_sum = pd.read_csv(data_home_sub / Files.SUM_TRAIN_FILE)
     test_sum = pd.read_csv(data_home_sub / Files.SUM_TEST_FILE)
 
+    if short_prompts:
+        my_summarizer = CachedSummarizer()
+        train_pro["prompt_text_short"] = train_pro["prompt_text"].apply(lambda x: my_summarizer(x)[0]['summary_text'])
+
     return train_pro, test_pro, train_sum, test_sum
 
 
@@ -146,8 +152,9 @@ class Config:
     max_seq_length: int = 512
     add_prompt_question: bool = False
     add_prompt_text: bool = False
-    hidden_dropout_prob: float = 0.05
-    attention_probs_dropout_prob: float = 0.05
+    add_prompt_text_short: bool = False
+    hidden_dropout_prob: float = 0.00
+    attention_probs_dropout_prob: float = 0.00
     learning_rate: float = 5e-05
     weight_decay: float = 0.0
     batch_size: int = 6
@@ -167,14 +174,16 @@ class Config:
 
 
 def tokenize(example, tokenizer, config, labelled=True):
-    sep = tokenizer.sep_token
+    sep = f" {tokenizer.sep_token} "
 
     cols = []
 
+    if config.add_prompt_text:
+        cols.append("prompt_text")
+    if config.add_prompt_text:
+        cols.append("prompt_text_short")
     if config.add_prompt_question:
         cols.append("prompt_question")
-    elif config.add_prompt_text:
-        cols.append("prompt_text")
     cols.append("text")
 
     tokenized = tokenizer(
@@ -951,3 +960,55 @@ def train_lgbm(train, targets, drop_columns):
     wandb.log(metrics)
 
     return model_dict, metrics
+
+class CachedSummarizer:
+    def __init__(self,
+                 model_name_or_path="facebook/bart-large-cnn",
+                 max_length=450,
+                 min_length=400,
+                 ):
+        self.cache = self._read_cache()
+        self.model_name_or_path = model_name_or_path
+        self.max_length = max_length
+        self.min_length = min_length
+        self.summarizer = None
+
+    @staticmethod
+    def _get_cache_file():
+        cache_directory = os.environ.get(CLESS_DATA_ENV, CLESS_DATA_ENV_DEFAULT)
+        cache_directory_file = os.path.join(cache_directory, SUMMARIZATION_CACHE_FILE)
+        return cache_directory_file
+
+    def _read_cache(self) -> Dict:
+        cache_path = self._get_cache_file()
+        if os.path.isfile(cache_path):
+            if os.path.isfile(cache_path):
+                with open(cache_path) as f:
+                    cache = json.load(f)
+                    print(f"Cache found in {cache_path}, Cache length: {len(cache)}")
+            return cache
+        print(f"Cache NOT found in {cache_path}")
+        return {}
+
+    def dump_cache(self):
+        cache_path = self._get_cache_file()
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w") as f:
+            json.dump(self.cache, f, indent=2, ensure_ascii=False)
+
+    def __call__(self, text):
+        if text in self.cache:
+            return self.cache[text]
+
+        if self.summarizer is None:
+            self.summarizer = pipeline("summarization", model=self.model_name_or_path)
+
+        summary = self.summarizer(
+            text,
+            max_length=self.max_length,
+            min_length=self.min_length,
+            do_sample=True,
+            truncation=True,
+        )
+        self.cache[text] = summary
+        return summary
