@@ -42,6 +42,7 @@ from transformers import (
     TrainingArguments,
     set_seed
 )
+from torch import nn
 
 
 class Files:
@@ -76,7 +77,6 @@ MODEL_DUMPS_DIR = "model_dumps"
 TARGET_LABELS = ["content", "wording"]
 PREDICTION_LABELS = [f"pred_{t}" for t in TARGET_LABELS]
 KEEP_BEST_MODELS = 3
-SUMMARIZATION_CACHE_FILE = "summarization-cache/summarization_cache.json"
 
 
 def get_wandb_tags():
@@ -143,7 +143,7 @@ def read_cless_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Data
 @dataclass
 class Config:
     model_name_or_path: str = "microsoft/deberta-v3-base"
-    # model_name_or_path: str = "microsoft/deberta-v3-large"
+    pretrained_path: Optional[str] = None
     max_seq_length: int = 512
     add_prompt_question: bool = False
     add_prompt_text: bool = False
@@ -217,32 +217,24 @@ class ClessModel:
     def __init__(
         self,
         model_name_or_path: str,
+        pretrained_path: Optional[str],
         tmp_dir: str = TMP_DIR,
         dump_dir: str = MODEL_DUMPS_DIR,
     ):
         self.model_name_or_path = model_name_or_path
+        self.pretrained_path = pretrained_path
+        self.load_path = pretrained_path or model_name_or_path
         self.tmp_dir = tmp_dir
         self.dump_dir = dump_dir
-
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
-        self.model_config = AutoConfig.from_pretrained(self.model_name_or_path)
-
-        self.model_config.update(
-            {
-                "num_labels": 2,
-                "problem_type": "regression",
-                'output_hidden_states': True,
-            }
-        )
-        self.data_collator = DataCollatorWithPadding(tokenizer=self.tokenizer)
 
     def train_single_fold(
         self,
         config: Config,
         fold: int,
     ):
-        if not isinstance(fold, int):
-            raise ValueError(f"Fold should be INT. Passed {fold}")
+        model_config = AutoConfig.from_pretrained(self.load_path)
+        tokenizer = AutoTokenizer.from_pretrained(self.load_path)
+        data_collator = DataCollatorWithPadding(tokenizer)
 
         if config.report_to == "wandb":
             run = wandb.init(
@@ -252,12 +244,11 @@ class ClessModel:
                 tags=get_wandb_tags() + [f"fold_{fold}"],
             )
         set_seed(config.seed)
-        self.model_config.update(
+        model_config.update(
             {
                 "hidden_dropout_prob": config.hidden_dropout_prob,
                 "attention_probs_dropout_prob": config.attention_probs_dropout_prob,
                 "cfg": asdict(config),
-                "pooling_method": config.pooling_method,
             }
         )
 
@@ -271,12 +262,12 @@ class ClessModel:
         train_ds = train_ds.map(
             tokenize,
             batched=False,
-            fn_kwargs={"tokenizer": self.tokenizer, "config": config},
+            fn_kwargs={"tokenizer": tokenizer, "config": config},
         )
         val_ds = val_ds.map(
             tokenize,
             batched=False,
-            fn_kwargs={"tokenizer": self.tokenizer, "config": config},
+            fn_kwargs={"tokenizer": tokenizer, "config": config},
         )
 
         # dry run
@@ -303,21 +294,26 @@ class ClessModel:
             save_steps=config.eval_every,
             metric_for_best_model="mcrmse",
             save_total_limit=1,
+            logging_steps=config.eval_every,
             seed=config.seed,
             fp16=config.fp16,
         )
 
         model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name_or_path, config=self.model_config
+            self.load_path, config=model_config
         )
+        if model.classifier.out_features != 2:
+            # patch last layer
+            model.classifier = nn.Linear(in_features=768, out_features=2)
+            model.config.update({"num_labels": 2})
 
         trainer = Trainer(
             model=model,
             args=training_args,
             train_dataset=train_ds,
             eval_dataset=val_ds,
-            data_collator=self.data_collator,
-            tokenizer=self.tokenizer,
+            data_collator=data_collator,
+            tokenizer=tokenizer,
             compute_metrics=compute_mcrmse_for_trainer,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=config.patience)],
         )
@@ -334,20 +330,24 @@ class ClessModel:
         return eval_res
 
     def predict_single_fold(self, df):
-        config = Config(**self.model_config.cfg)
+        model_config = AutoConfig.from_pretrained(self.load_path)
+        tokenizer = AutoTokenizer.from_pretrained(self.load_path)
+        data_collator = DataCollatorWithPadding(tokenizer)
+
+        config = Config(**model_config.cfg)
         test_ds = Dataset.from_pandas(df)
         test_ds = test_ds.map(
             tokenize,
             fn_kwargs={
-                "tokenizer": self.tokenizer,
+                "tokenizer": tokenizer,
                 "config": config,
                 "labelled": False,
             },
         )
 
         model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name_or_path,
-            config=self.model_config,
+            self.load_path,
+            config=model_config,
         )
         model.eval()
 
@@ -360,8 +360,8 @@ class ClessModel:
         )
         infer = Trainer(
             model=model,
-            tokenizer=self.tokenizer,
-            data_collator=self.data_collator,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
             args=test_args,
         )
         predictions = infer.predict(test_dataset=test_ds)
@@ -381,7 +381,9 @@ def cless_ensamble_train(config: Config):
     for fold in range(4):
         print(f">>> Training fold {fold}:")
         cless_model = ClessModel(
-            model_name_or_path=config.model_name_or_path, dump_dir=dump_dir
+            model_name_or_path=config.model_name_or_path,
+            pretrained_path=config.pretrained_path,
+            dump_dir=dump_dir,
         )
         eval_res = cless_model.train_single_fold(
             fold=fold,
@@ -465,7 +467,10 @@ def cless_ensamble_sweep(cli_config: Config):
 def cless_single_fold_predict(fold_subdir, df):
     """For cross-validation / LGBM training"""
     assert os.path.isdir(fold_subdir)
-    cless_deberta = ClessModel(model_name_or_path=fold_subdir)
+    cless_deberta = ClessModel(
+        model_name_or_path=fold_subdir,
+        pretrained_path=None,
+    )
     fold_prediction = cless_deberta.predict_single_fold(df)
     partial_prediction = pd.concat(
         [

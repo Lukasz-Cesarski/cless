@@ -34,3 +34,4 @@ gensim
 textstat
 https://github.com/andrei-papou/textstat/archive/main.zip
 # pip uninstall nvidia_cublas_cu11
+iterative-stratification==0.1.7
