@@ -147,7 +147,6 @@ class Config:
     max_seq_length: int = 512
     add_prompt_question: bool = False
     add_prompt_text: bool = False
-    add_prompt_text_short: bool = False
     hidden_dropout_prob: float = 0.00
     attention_probs_dropout_prob: float = 0.00
     learning_rate: float = 5e-05
