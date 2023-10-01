@@ -172,6 +172,7 @@ class Config:
     patience: int = 15  # early stopping
     pooling_method: str = "CLSPooling"
     fp16: Optional[bool] = None
+    use_custom_model_architecture: bool = False
 
     def __post_init__(self):
         if self.fp16 is None:
@@ -445,6 +446,7 @@ class ClessDebertaV2ForSequenceClassification(DebertaV2PreTrainedModel):
             attentions=outputs.attentions
         )
 
+
 class ClessModel:
     def __init__(
         self,
@@ -539,9 +541,14 @@ class ClessModel:
             fp16=config.fp16,
         )
 
-        model = ClessDebertaV2ForSequenceClassification.from_pretrained(
-            self.model_name_or_path, config=self.model_config
-        )
+        if config.use_custom_model_architecture:
+            model = ClessDebertaV2ForSequenceClassification.from_pretrained(
+                self.model_name_or_path, config=self.model_config
+            )
+        else:
+            model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_name_or_path, config=self.model_config
+            )
 
         trainer = Trainer(
             model=model,
@@ -577,10 +584,16 @@ class ClessModel:
             },
         )
 
-        model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name_or_path,
-            config=self.model_config,
-        )
+        if config.use_custom_model_architecture:
+            model = ClessDebertaV2ForSequenceClassification.from_pretrained(
+                self.model_name_or_path,
+                config=self.model_config,
+            )
+        else:
+            model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_name_or_path,
+                config=self.model_config,
+            )
         model.eval()
 
         test_args = TrainingArguments(
