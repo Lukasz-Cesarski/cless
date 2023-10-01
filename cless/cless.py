@@ -14,12 +14,11 @@ import os
 import re
 import shutil
 import warnings
-from abc import abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from pprint import pprint
-from typing import List, Optional, Tuple, Dict, Union
+from typing import List, Optional, Tuple
 
 import lightgbm as lgb
 import numpy as np
@@ -28,14 +27,12 @@ import spacy
 import textstat
 import torch
 import wandb
-import torch.nn as nn
 from datasets import Dataset, disable_progress_bar
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from sklearn.metrics import mean_squared_error
 from tqdm import tqdm
 from transformers import (
-    pipeline,
     AutoConfig,
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -43,13 +40,8 @@ from transformers import (
     EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
-    set_seed,
-    DebertaV2ForSequenceClassification, DebertaV2PreTrainedModel, DebertaV2Model,
+    set_seed
 )
-from transformers.activations import ACT2FN
-from transformers.modeling_outputs import SequenceClassifierOutput
-from transformers.models.deberta_v2.modeling_deberta_v2 import StableDropout, ContextPooler
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 
 class Files:
@@ -129,7 +121,7 @@ def general_setup(free_cublas=False, internet_connection=True):
         exit(1)
 
 
-def read_cless_data(short_prompts=True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def read_cless_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     data_home = os.environ.get(CLESS_DATA_ENV)
     if data_home is None:
         # default kaggle location
@@ -144,10 +136,6 @@ def read_cless_data(short_prompts=True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.
     test_pro = pd.read_csv(data_home_sub / Files.PRO_TEST_FILE)
     train_sum = pd.read_csv(data_home_sub / Files.SUM_TRAIN_FILE)
     test_sum = pd.read_csv(data_home_sub / Files.SUM_TEST_FILE)
-
-    if short_prompts:
-        my_summarizer = CachedSummarizer()
-        train_pro["prompt_text_short"] = train_pro["prompt_text"].apply(lambda x: my_summarizer(x)[0]['summary_text'])
 
     return train_pro, test_pro, train_sum, test_sum
 
@@ -170,7 +158,6 @@ class Config:
     report_to: str = "wandb"
     eval_every: int = 50
     patience: int = 15  # early stopping
-    pooling_method: str = "CLSPooling"
     fp16: Optional[bool] = None
 
     def __post_init__(self):
@@ -179,94 +166,6 @@ class Config:
                 self.fp16 = True
             else:
                 self.fp16 = False
-
-
-class AbstractPooling(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.dense = nn.Linear(config.pooler_hidden_size, config.pooler_hidden_size)
-        self.dropout = StableDropout(config.pooler_dropout)
-
-    @abstractmethod
-    def _make_pooling(self, hidden_states, attention_mask):
-        raise NotImplemented
-
-    def forward(self, hidden_states, attention_mask):
-        out = self._make_pooling(hidden_states, attention_mask)
-        out = self.dropout(out)
-        out = self.dense(out)
-        out = ACT2FN[self.config.pooler_hidden_act](out)
-        return out
-
-    @property
-    def output_dim(self):
-        return self.config.hidden_size
-
-
-class CLSPooling(AbstractPooling):
-    """
-    We "pool" the model by simply taking the hidden state corresponding
-    to the first token.
-    """
-
-    def __init__(self, config):
-        super().__init__(config)
-
-    def _make_pooling(self, hidden_states, attention_mask):
-        out = hidden_states[-1][:, 0]
-        return out
-
-
-class MeanPooling(AbstractPooling):
-    def __init__(self, config):
-        super().__init__(config)
-
-    def _make_pooling(self, hidden_states, attention_mask):
-        last_hidden_state = hidden_states[-1]
-
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-        sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, 1)
-        sum_mask = input_mask_expanded.sum(1)
-        sum_mask = torch.clamp(sum_mask, min=1e-9)
-        mean_embeddings = sum_embeddings / sum_mask
-        return mean_embeddings
-
-
-class MaxPooling(AbstractPooling):
-    def __init__(self, config):
-        super().__init__(config)
-
-    def _make_pooling(self, hidden_states, attention_mask):
-        last_hidden_state = hidden_states[-1]
-
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-        last_hidden_state[input_mask_expanded == 0] = -1e9  # Set padding tokens to large negative value
-        max_embeddings = torch.max(last_hidden_state, 1)[0]
-        return max_embeddings
-
-
-class MeanMaxPooling(AbstractPooling):
-    def __init__(self, config):
-        super().__init__(config)
-        # del self.dense
-        self.dense = nn.Linear(2*config.pooler_hidden_size, config.pooler_hidden_size)
-
-    def _make_pooling(self, hidden_states, attention_mask):
-        last_hidden_state = hidden_states[-1]
-
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-
-        sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, 1)
-        sum_mask = input_mask_expanded.sum(1)
-        sum_mask = torch.clamp(sum_mask, min=1e-9)
-        mean_embeddings = sum_embeddings / sum_mask
-
-        last_hidden_state[input_mask_expanded == 0] = -1e9  # Set padding tokens to large negative value
-        max_embeddings = torch.max(last_hidden_state, 1)[0]
-        mean_max_embeddings = torch.cat((mean_embeddings, max_embeddings), 1)
-        return mean_max_embeddings
-
 
 def tokenize(example, tokenizer, config, labelled=True):
     sep = f" {tokenizer.sep_token} "
@@ -313,137 +212,6 @@ def compute_mcrmse_for_trainer(eval_pred):
 
     return result
 
-
-class ClessDebertaV2ForSequenceClassification(DebertaV2PreTrainedModel):
-    """
-    Extended version of
-    from transformers import DebertaV2PreTrainedModel
-    """
-
-    def __init__(self, config):
-        super().__init__(config)
-
-        num_labels = getattr(config, "num_labels", 2)
-        self.num_labels = num_labels
-
-        self.deberta = DebertaV2Model(config)
-        if config.pooling_method == "ContextPooler":
-            pooler = ContextPooler(config)
-        elif config.pooling_method == "CLSPooling":
-            pooler = CLSPooling(config)
-        elif config.pooling_method == "MeanPooling":
-            pooler = MeanPooling(config)
-        elif config.pooling_method == "MaxPooling":
-            pooler = MaxPooling(config)
-        elif config.pooling_method == "MeanMaxPooling":
-            pooler = MeanMaxPooling(config)
-        else:
-            raise NotImplementedError(f"Pooling method {config.pooling_method} not recognized")
-
-        self.pooler = pooler
-        output_dim = self.pooler.output_dim
-
-        self.classifier = nn.Linear(output_dim, num_labels)
-        drop_out = getattr(config, "cls_dropout", None)
-        drop_out = self.config.hidden_dropout_prob if drop_out is None else drop_out
-        self.dropout = StableDropout(drop_out)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.deberta.get_input_embeddings()
-
-    def set_input_embeddings(self, new_embeddings):
-        self.deberta.set_input_embeddings(new_embeddings)
-
-    def forward(
-            self,
-            input_ids: Optional[torch.Tensor] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            token_type_ids: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.Tensor] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
-            labels: Optional[torch.Tensor] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, SequenceClassifierOutput]:
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
-            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
-            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.deberta(
-            input_ids,
-            token_type_ids=token_type_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        last_hidden_state = outputs[0]
-        hidden_states = outputs[1]
-        # original class of HF transformers - different input
-        if isinstance(self.pooler, ContextPooler):
-            pooled_output = self.pooler(last_hidden_state)
-        else:
-            pooled_output = self.pooler(hidden_states, attention_mask)
-        # pooled_output = self.pooler(hidden_states)
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
-
-        loss = None
-        if labels is not None:
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    # regression task
-                    loss_fn = nn.MSELoss()
-                    logits = logits.view(-1).to(labels.dtype)
-                    loss = loss_fn(logits, labels.view(-1))
-                elif labels.dim() == 1 or labels.size(-1) == 1:
-                    label_index = (labels >= 0).nonzero()
-                    labels = labels.long()
-                    if label_index.size(0) > 0:
-                        labeled_logits = torch.gather(
-                            logits, 0, label_index.expand(label_index.size(0), logits.size(1))
-                        )
-                        labels = torch.gather(labels, 0, label_index.view(-1))
-                        loss_fct = CrossEntropyLoss()
-                        loss = loss_fct(labeled_logits.view(-1, self.num_labels).float(), labels.view(-1))
-                    else:
-                        loss = torch.tensor(0).to(logits)
-                else:
-                    log_softmax = nn.LogSoftmax(-1)
-                    loss = -((log_softmax(logits) * labels).sum(-1)).mean()
-            elif self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                loss = loss_fct(logits, labels)
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return ((loss,) + output) if loss is not None else output
-
-        return SequenceClassifierOutput(
-            loss=loss, logits=logits,
-            # do not return hidden states (CUDA OOM)
-            hidden_states=None,
-            attentions=outputs.attentions
-        )
 
 class ClessModel:
     def __init__(
@@ -539,7 +307,7 @@ class ClessModel:
             fp16=config.fp16,
         )
 
-        model = ClessDebertaV2ForSequenceClassification.from_pretrained(
+        model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name_or_path, config=self.model_config
         )
 
@@ -1188,55 +956,3 @@ def train_lgbm(train, targets, drop_columns):
     wandb.log(metrics)
 
     return model_dict, metrics
-
-class CachedSummarizer:
-    def __init__(self,
-                 model_name_or_path="facebook/bart-large-cnn",
-                 max_length=450,
-                 min_length=400,
-                 ):
-        self.cache = self._read_cache()
-        self.model_name_or_path = model_name_or_path
-        self.max_length = max_length
-        self.min_length = min_length
-        self.summarizer = None
-
-    @staticmethod
-    def _get_cache_file():
-        cache_directory = os.environ.get(CLESS_DATA_ENV, CLESS_DATA_ENV_DEFAULT)
-        cache_directory_file = os.path.join(cache_directory, SUMMARIZATION_CACHE_FILE)
-        return cache_directory_file
-
-    def _read_cache(self) -> Dict:
-        cache_path = self._get_cache_file()
-        if os.path.isfile(cache_path):
-            if os.path.isfile(cache_path):
-                with open(cache_path) as f:
-                    cache = json.load(f)
-                    print(f"Cache found in {cache_path}, Cache length: {len(cache)}")
-            return cache
-        print(f"Cache NOT found in {cache_path}")
-        return {}
-
-    def dump_cache(self):
-        cache_path = self._get_cache_file()
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "w") as f:
-            json.dump(self.cache, f, indent=2, ensure_ascii=False)
-
-    def __call__(self, text):
-        if text in self.cache:
-            return self.cache[text]
-
-        if self.summarizer is None:
-            self.summarizer = pipeline("summarization", model=self.model_name_or_path)
-
-        summary = self.summarizer(
-            text,
-            max_length=self.max_length,
-            min_length=self.min_length,
-            do_sample=True,
-            truncation=True,
-        )
-        self.cache[text] = summary
-        return summary
