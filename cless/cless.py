@@ -43,6 +43,7 @@ from transformers import (
     set_seed
 )
 from torch import nn
+from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 
 class Files:
@@ -248,6 +249,81 @@ class ClessModel:
             }
         )
 
+        ### PRETRAINING ON PSEUDOLABELS ###
+        fbp3_path = os.environ.get(CLESS_DATA_ENV, CLESS_DATA_ENV_DEFAULT)
+        fbp3_path = Path(fbp3_path) / "feedback-prize-english-language-learning" / "train.csv"
+        assert fbp3_path.exists()
+        fbp3_data = pd.read_csv(fbp3_path)
+
+        ps_lab_path = "sandbox/datasets/fbp3_pseudolabelling/pseudolabelling.csv"
+        ps_lab_path = Path(ps_lab_path)
+        assert ps_lab_path.exists()
+        ps_lab_data = pd.read_csv(ps_lab_path)
+
+        pretraining_df = pd.merge(fbp3_data, ps_lab_data, left_on="text_id", right_on="student_id")
+        pretraining_df = pretraining_df.rename(columns={"full_text": "text"})
+
+        fold_placeholder = -1000
+        n_fold = 10
+        pretraining_df["fold"] = fold_placeholder
+        fold = MultilabelStratifiedKFold(n_splits=n_fold, shuffle=True, random_state=config.seed)
+        for n, (train_index, val_index) in enumerate(fold.split(pretraining_df, pretraining_df[TARGET_LABELS])):
+            pretraining_df.loc[val_index, 'fold'] = int(n)
+        assert not (pretraining_df["fold"] == fold_placeholder).any()
+        pretraining_df["fold"].value_counts()
+
+        pseudo_train_ds = Dataset.from_pandas(pretraining_df[pretraining_df["fold"] != fold])
+        pseudo_val_ds = Dataset.from_pandas(pretraining_df[pretraining_df["fold"] == fold])
+        pseudo_train_ds = pseudo_train_ds.map(
+            tokenize,
+            batched=False,
+            fn_kwargs={"tokenizer": tokenizer, "config": config},
+        )
+        pseudo_val_ds = pseudo_val_ds.map(
+            tokenize,
+            batched=False,
+            fn_kwargs={"tokenizer": tokenizer, "config": config},
+        )
+        training_args = TrainingArguments(
+            output_dir=TMP_DIR,
+            load_best_model_at_end=True,  # select best model
+            learning_rate=config.learning_rate,
+            per_device_train_batch_size=config.batch_size,
+            per_device_eval_batch_size=config.batch_size,
+            num_train_epochs=config.num_train_epochs,
+            weight_decay=config.weight_decay,
+            report_to=config.report_to,
+            greater_is_better=False,
+            save_strategy="steps",
+            evaluation_strategy="steps",
+            eval_steps=config.eval_every,
+            save_steps=config.eval_every,
+            metric_for_best_model="mcrmse",
+            save_total_limit=1,
+            logging_steps=config.eval_every,
+            seed=config.seed,
+            fp16=config.fp16,
+            warmup_steps=200,
+        )
+
+        model = AutoModelForSequenceClassification.from_pretrained(
+            config.model_name_or_path, config=model_config
+        )
+
+        pseudo_trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=pseudo_train_ds,
+            eval_dataset=pseudo_val_ds,
+            data_collator=data_collator,
+            tokenizer=tokenizer,
+            compute_metrics=compute_mcrmse_for_trainer,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=5)],
+        )
+        pseudo_trainer.train()
+
+        ### TRAINING ON COMPETITION DATA ###
+
         train_pro, test_pro, train_sum, test_sum = read_cless_data()
         df = train_pro.merge(train_sum, on="prompt_id")
         assert set(ID2FOLD.keys()) == set(df["prompt_id"].unique())
@@ -273,31 +349,6 @@ class ClessModel:
 
             dry_run_ds = val_ds.train_test_split(None, 10)
             val_ds = dry_run_ds["train"]
-
-        training_args = TrainingArguments(
-            output_dir=self.tmp_dir,
-            load_best_model_at_end=True,  # select best model
-            learning_rate=config.learning_rate,
-            per_device_train_batch_size=config.batch_size,
-            per_device_eval_batch_size=config.batch_size,
-            num_train_epochs=config.num_train_epochs,
-            weight_decay=config.weight_decay,
-            report_to=config.report_to,
-            greater_is_better=False,
-            save_strategy="steps",
-            evaluation_strategy="steps",
-            eval_steps=config.eval_every,
-            save_steps=config.eval_every,
-            metric_for_best_model="mcrmse",
-            save_total_limit=1,
-            logging_steps=config.eval_every,
-            seed=config.seed,
-            fp16=config.fp16,
-        )
-
-        model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name_or_path, config=model_config
-        )
 
         trainer = Trainer(
             model=model,
@@ -326,7 +377,14 @@ class ClessModel:
         tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
         data_collator = DataCollatorWithPadding(tokenizer)
 
-        config = Config(**model_config.cfg)
+        config_kwargs = {
+            k: v for k, v in model_config.cfg.items() if k not in [
+                # legacy keywords
+                "add_prompt_text_short",
+            ]
+        }
+
+        config = Config(**config_kwargs)
         test_ds = Dataset.from_pandas(df)
         test_ds = test_ds.map(
             tokenize,
