@@ -232,6 +232,12 @@ class ClessModel:
         model_config = AutoConfig.from_pretrained(self.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
         data_collator = DataCollatorWithPadding(tokenizer)
+        model_config.update(
+            {
+                "num_labels": 2,
+                "problem_type": "regression",
+            }
+        )
 
         if config.report_to == "wandb":
             run = wandb.init(
