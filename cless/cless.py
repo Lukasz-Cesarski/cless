@@ -266,11 +266,10 @@ class ClessModel:
         fold_placeholder = -1000
         n_fold = 10
         pretraining_df["fold"] = fold_placeholder
-        fold = MultilabelStratifiedKFold(n_splits=n_fold, shuffle=True, random_state=config.seed)
-        for n, (train_index, val_index) in enumerate(fold.split(pretraining_df, pretraining_df[TARGET_LABELS])):
+        multifold = MultilabelStratifiedKFold(n_splits=n_fold, shuffle=True, random_state=config.seed)
+        for n, (train_index, val_index) in enumerate(multifold.split(pretraining_df, pretraining_df[TARGET_LABELS])):
             pretraining_df.loc[val_index, 'fold'] = int(n)
         assert not (pretraining_df["fold"] == fold_placeholder).any()
-        pretraining_df["fold"].value_counts()
 
         pseudo_train_ds = Dataset.from_pandas(pretraining_df[pretraining_df["fold"] != fold])
         pseudo_val_ds = Dataset.from_pandas(pretraining_df[pretraining_df["fold"] == fold])
