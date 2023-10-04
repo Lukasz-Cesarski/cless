@@ -175,8 +175,6 @@ def tokenize(example, tokenizer, config, labelled=True):
 
     if config.add_prompt_text:
         cols.append("prompt_text")
-    if config.add_prompt_text:
-        cols.append("prompt_text_short")
     if config.add_prompt_question:
         cols.append("prompt_question")
     cols.append("text")
