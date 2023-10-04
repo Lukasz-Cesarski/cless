@@ -173,15 +173,14 @@ def tokenize(example, tokenizer, config, labelled=True):
     sep = f" {tokenizer.sep_token} "
 
     cols = []
-
-    if config.add_prompt_text:
-        cols.append("prompt_text")
+    cols.append("text")
     if config.add_prompt_question:
         cols.append("prompt_question")
-    cols.append("text")
+    if config.add_prompt_text:
+        cols.append("prompt_text")
 
     tokenized = tokenizer(
-        sep.join([example[c] for c in cols]),
+        sep.join([example[c] for c in cols]).strip(),
         padding=False,
         truncation=True,
         max_length=config.max_seq_length,
