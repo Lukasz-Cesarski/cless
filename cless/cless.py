@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import warnings
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -280,6 +281,11 @@ class ClessModel:
         )
 
         if config.pseudo_training:
+            pseudo_config = deepcopy(config)
+            # FBP3 dataset does not contain prompts
+            pseudo_config.add_prompt_text = False
+            pseudo_config.add_prompt_question = False
+
             ### PRETRAINING ON PSEUDOLABELS ###
             fbp3_path = os.environ.get(CLESS_DATA_ENV, CLESS_DATA_ENV_DEFAULT)
             fbp3_path = Path(fbp3_path) / "feedback-prize-english-language-learning" / "train.csv"
@@ -297,7 +303,7 @@ class ClessModel:
             fold_placeholder = -1000
             n_fold = 10
             pretraining_df["fold"] = fold_placeholder
-            multifold = MultilabelStratifiedKFold(n_splits=n_fold, shuffle=True, random_state=config.seed)
+            multifold = MultilabelStratifiedKFold(n_splits=n_fold, shuffle=True, random_state=pseudo_config.seed)
             for n, (train_index, val_index) in enumerate(multifold.split(pretraining_df, pretraining_df[TARGET_LABELS])):
                 pretraining_df.loc[val_index, 'fold'] = int(n)
             assert not (pretraining_df["fold"] == fold_placeholder).any()
@@ -307,12 +313,12 @@ class ClessModel:
             pseudo_train_ds = pseudo_train_ds.map(
                 tokenize,
                 batched=False,
-                fn_kwargs={"tokenizer": tokenizer, "config": config},
+                fn_kwargs={"tokenizer": tokenizer, "config": pseudo_config},
             )
             pseudo_val_ds = pseudo_val_ds.map(
                 tokenize,
                 batched=False,
-                fn_kwargs={"tokenizer": tokenizer, "config": config},
+                fn_kwargs={"tokenizer": tokenizer, "config": pseudo_config},
             )
 
             pseudo_trainer = Trainer(
