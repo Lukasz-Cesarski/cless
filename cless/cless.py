@@ -161,6 +161,7 @@ class Config:
     warmup: int = 200
     fp16: Optional[bool] = None
     pseudo_training: bool = False
+    freeze_layers: int = 0
 
     def __post_init__(self):
         if self.fp16 is None:
@@ -210,6 +211,11 @@ def compute_mcrmse_for_trainer(eval_pred):
     result["mcrmse"] = mcrmse
 
     return result
+
+
+def turn_off_params(module: nn.Module) -> None:
+    for param in module.parameters():
+        param.requires_grad = False
 
 
 class ClessModel:
@@ -278,6 +284,11 @@ class ClessModel:
         model = AutoModelForSequenceClassification.from_pretrained(
             config.model_name_or_path, config=model_config
         )
+
+        if config.freeze_layers > 0:
+            turn_off_params(model.deberta.embeddings)
+            for idx in range(config.freeze_layers):
+                turn_off_params(model.deberta.encoder.layer[idx])
 
         if config.pseudo_training:
             pseudo_config = deepcopy(config)
@@ -924,37 +935,41 @@ def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
     return input_df
 
 
-def train_lgbm(train, targets, drop_columns):
+def train_lgbm(train, drop_columns, use_wandb=True, default_params=None):
     # https://colab.research.google.com/drive/181GCGp36_75C2zm7WLxr9U2QjMXXoibt#scrollTo=aIhxl7glaJ5k
-    # defaults
-    default_params = {
-        "random_state": 42,
-        "objective": "regression",
-        "metric": "rmse",
-        "learning_rate": 0.1,  # ---sweep
-        "boosting": "gbdt",
-        "num_leaves": 31,  # ---sweep
-        "max_depth": -1,  # ---sweep
-        "min_data_in_leaf": 10,  # ---sweep
-        "min_data_in_bin": 5,  # like in OLD
-        "lambda_l1": 0.0,  # default
-        "lambda_l2": 0.0,  # default
-        "max_bin": 127,  # takie mid
-        "feature_fraction": 1.0,  # check
-        "bagging_fraction": 1.0,  # check
-    }
-    # Initialize a new wandb run
-    wandb.init(
-        config=default_params,
-        reinit=True,
-        project=WandbProjects.WANDB_LGBM_FOLDS,
-        tags=get_wandb_tags(),
-    )
+
+    if default_params is None:
+        # defaults
+        default_params = {
+            "random_state": 42,
+            "objective": "regression",
+            "metric": "rmse",
+            "learning_rate": 0.1,  # ---sweep
+            "boosting": "gbdt",
+            "num_leaves": 31,  # ---sweep
+            "max_depth": -1,  # ---sweep
+            "min_data_in_leaf": 10,  # ---sweep
+            "min_data_in_bin": 5,  # like in OLD
+            "lambda_l1": 0.0,  # default
+            "lambda_l2": 0.0,  # default
+            "max_bin": 127,  # takie mid
+            "feature_fraction": 1.0,  # check
+            "bagging_fraction": 1.0,  # check
+        }
+
+    if use_wandb:
+        # Initialize a new wandb run
+        wandb.init(
+            config=default_params,
+            reinit=True,
+            project=WandbProjects.WANDB_LGBM_FOLDS,
+            tags=get_wandb_tags(),
+        )
 
     TRAINING_COLUMNS = None
     model_dict = {}
 
-    for target in targets:
+    for target in TARGET_LABELS:
         models = []
 
         for fold in range(4):
@@ -971,8 +986,11 @@ def train_lgbm(train, targets, drop_columns):
             dval = lgb.Dataset(X_eval_cv, label=y_eval_cv)
 
             evaluation_results = {}
-            # deepcopy may cause MaxRecursionException
-            hyperparameters = {k: v for k, v in wandb.config.items()}
+            if use_wandb:
+                # deepcopy may cause MaxRecursionException
+                hyperparameters = {k: v for k, v in wandb.config.items()}
+            else:
+                hyperparameters = default_params
 
             model = lgb.train(
                 hyperparameters,
@@ -996,7 +1014,7 @@ def train_lgbm(train, targets, drop_columns):
     # cv
     metrics = {}
 
-    for target in targets:
+    for target in TARGET_LABELS:
         models = model_dict[target]
 
         preds = []
@@ -1017,6 +1035,8 @@ def train_lgbm(train, targets, drop_columns):
 
     mcrmse = sum(metrics.values()) / len(metrics)
     metrics["mcrmse"] = mcrmse
-    wandb.log(metrics)
+
+    if use_wandb:
+        wandb.log(metrics)
 
     return model_dict, metrics
