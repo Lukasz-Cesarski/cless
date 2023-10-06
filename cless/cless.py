@@ -79,7 +79,12 @@ MODEL_DUMPS_DIR = "model_dumps"
 TARGET_LABELS = ["content", "wording"]
 PREDICTION_LABELS = [f"pred_{t}" for t in TARGET_LABELS]
 KEEP_BEST_MODELS = 3
-
+DEPRECATED_KEYS = [
+    # legacy keywords
+    "add_prompt_text_short",
+    "data_dir",
+    "num_proc",
+]
 
 def get_wandb_tags():
     if any(k.startswith("KAGGLE") for k in os.environ.keys()):
@@ -398,12 +403,7 @@ class ClessModel:
         data_collator = DataCollatorWithPadding(tokenizer)
 
         config_kwargs = {
-            k: v for k, v in model_config.cfg.items() if k not in [
-                # legacy keywords
-                "add_prompt_text_short",
-                "data_dir",
-                "num_proc",
-            ]
+            k: v for k, v in model_config.cfg.items() if k not in DEPRECATED_KEYS
         }
 
         config = Config(**config_kwargs)

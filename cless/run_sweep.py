@@ -109,25 +109,25 @@ class CommandLine:
 
 if __name__ == "__main__":
     parser = HfArgumentParser((CommandLine, Config))
-    (cl, cli_config) = parser.parse_args_into_dataclasses()
-    general_setup(free_cublas=cl.free_cublas)
+    (cli, config) = parser.parse_args_into_dataclasses()
+    general_setup(free_cublas=cli.free_cublas)
 
     start = datetime.now()
-    if cl.sweep_id is None:
-        if "large" in cli_config.model_name_or_path:
+    if cli.sweep_id is None:
+        if "large" in config.model_name_or_path:
             sweep_config = SWEEP_CONFIG_LARGE.copy()
-        elif "base" in cli_config.model_name_or_path:
+        elif "base" in config.model_name_or_path:
             sweep_config = SWEEP_CONFIG_BASE.copy()
         else:
-            raise NotImplemented(f"Not supported model name: {cli_config.model_name_or_path}")
+            raise NotImplemented(f"Not supported model name: {config.model_name_or_path}")
         sweep_id = wandb.sweep(sweep_config, project=WandbProjects.WANDB_DEBERTA_SWEEPS)
     else:
-        sweep_id = cl.sweep_id
+        sweep_id = cli.sweep_id
 
     wandb.agent(
         sweep_id=sweep_id,
-        function=lambda: cless_ensamble_sweep(cli_config=cli_config),
-        count=cl.count,
+        function=lambda: cless_ensamble_sweep(cli_config=config),
+        count=cli.count,
         project=WandbProjects.WANDB_DEBERTA_SWEEPS,
     )
     pprint(f"Script timer: {datetime.now() - start}")
