@@ -2,12 +2,14 @@
 CommonLit - Evaluate Student Summaries (CLESS)
 https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries/overview
 
-This file stores essential parts of code to
-- provide version control in GIT
-- upload it to remote machines
-- paste it in kaggle notebook (use magic `%%writefile cless.py` command)
-- easy code development (code refactor, black, import sort)
+This file stores essential parts of code.
+The code is organized this way to provide easy:
+- version control in GIT
+- upload to remote machines
+- pasting it kaggle notebook (use magic `%%writefile cless.py` command)
+- code development (code refactor, black formatting, import sort)
 """
+
 import gc
 import json
 import os
@@ -19,7 +21,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from pprint import pprint
-from typing import List, Optional, Tuple, Dict
+from typing import Dict, List, Optional, Tuple
 
 import lightgbm as lgb
 import numpy as np
@@ -29,22 +31,15 @@ import textstat
 import torch
 import wandb
 from datasets import Dataset, disable_progress_bar
+from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-from sklearn.metrics import mean_squared_error
-from tqdm import tqdm
-from transformers import (
-    AutoConfig,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-    EarlyStoppingCallback,
-    Trainer,
-    TrainingArguments,
-    set_seed
-)
 from torch import nn
-from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+from tqdm import tqdm
+from transformers import (AutoConfig, AutoModelForSequenceClassification,
+                          AutoTokenizer, DataCollatorWithPadding,
+                          EarlyStoppingCallback, Trainer, TrainingArguments,
+                          set_seed)
 
 
 class Files:
@@ -85,6 +80,7 @@ DEPRECATED_KEYS = [
     "data_dir",
     "num_proc",
 ]
+
 
 def get_wandb_tags():
     if any(k.startswith("KAGGLE") for k in os.environ.keys()):
@@ -174,6 +170,7 @@ class Config:
                 self.fp16 = True
             else:
                 self.fp16 = False
+
 
 def tokenize(example, tokenizer, config, labelled=True):
     sep = f" {tokenizer.sep_token} "
@@ -303,7 +300,11 @@ class ClessModel:
 
             ### PRETRAINING ON PSEUDOLABELS ###
             fbp3_path = os.environ.get(CLESS_DATA_ENV, CLESS_DATA_ENV_DEFAULT)
-            fbp3_path = Path(fbp3_path) / "feedback-prize-english-language-learning" / "train.csv"
+            fbp3_path = (
+                Path(fbp3_path)
+                / "feedback-prize-english-language-learning"
+                / "train.csv"
+            )
             assert fbp3_path.exists()
             fbp3_data = pd.read_csv(fbp3_path)
 
@@ -312,19 +313,29 @@ class ClessModel:
             assert ps_lab_path.exists()
             ps_lab_data = pd.read_csv(ps_lab_path)
 
-            pretraining_df = pd.merge(fbp3_data, ps_lab_data, left_on="text_id", right_on="student_id")
+            pretraining_df = pd.merge(
+                fbp3_data, ps_lab_data, left_on="text_id", right_on="student_id"
+            )
             pretraining_df = pretraining_df.rename(columns={"full_text": "text"})
 
             fold_placeholder = -1000
             n_fold = 10
             pretraining_df["fold"] = fold_placeholder
-            multifold = MultilabelStratifiedKFold(n_splits=n_fold, shuffle=True, random_state=pseudo_config.seed)
-            for n, (train_index, val_index) in enumerate(multifold.split(pretraining_df, pretraining_df[TARGET_LABELS])):
-                pretraining_df.loc[val_index, 'fold'] = int(n)
+            multifold = MultilabelStratifiedKFold(
+                n_splits=n_fold, shuffle=True, random_state=pseudo_config.seed
+            )
+            for n, (train_index, val_index) in enumerate(
+                multifold.split(pretraining_df, pretraining_df[TARGET_LABELS])
+            ):
+                pretraining_df.loc[val_index, "fold"] = int(n)
             assert not (pretraining_df["fold"] == fold_placeholder).any()
 
-            pseudo_train_ds = Dataset.from_pandas(pretraining_df[pretraining_df["fold"] != fold])
-            pseudo_val_ds = Dataset.from_pandas(pretraining_df[pretraining_df["fold"] == fold])
+            pseudo_train_ds = Dataset.from_pandas(
+                pretraining_df[pretraining_df["fold"] != fold]
+            )
+            pseudo_val_ds = Dataset.from_pandas(
+                pretraining_df[pretraining_df["fold"] == fold]
+            )
             pseudo_train_ds = pseudo_train_ds.map(
                 tokenize,
                 batched=False,
@@ -517,9 +528,7 @@ def cless_ensamble_sweep(cli_config: Config):
     )
     config = Config(**wandb.config)
 
-    fold_results, fold_results_log, new_dump_dir = cless_ensamble_train(
-        config=config
-    )
+    fold_results, fold_results_log, new_dump_dir = cless_ensamble_train(config=config)
 
     wandb.log(fold_results_log)
 
@@ -612,7 +621,7 @@ def cless_ensamble_predict_test(models_home):
 
 class CPMPSpellchecker:
     """
-    All credits goes for:
+    All credits goes to:
     https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries/discussion/433451
     https://www.kaggle.com/code/atamazian/spell-checker-using-word2vec-updated-work-by-cpmp/notebook
     https://www.kaggle.com/code/cpmpml/spell-checker-using-word2vec
@@ -936,7 +945,6 @@ def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
 
 
 def train_lgbm(train, drop_columns, use_wandb=True, default_params=None):
-    # https://colab.research.google.com/drive/181GCGp36_75C2zm7WLxr9U2QjMXXoibt#scrollTo=aIhxl7glaJ5k
 
     if default_params is None:
         # defaults
@@ -1012,31 +1020,22 @@ def train_lgbm(train, drop_columns, use_wandb=True, default_params=None):
         model_dict[target] = models
 
     # cv
-    metrics = {}
-
-    for target in TARGET_LABELS:
+    predictions = train[["student_id"] + TARGET_LABELS].copy(deep=True)
+    for target, pred_target in zip(TARGET_LABELS, PREDICTION_LABELS):
         models = model_dict[target]
-
-        preds = []
-        trues = []
+        predictions[pred_target] = np.nan
 
         for fold, model in enumerate(models):
             X_eval_cv = train[train["fold"] == fold].drop(columns=drop_columns)
             assert (X_eval_cv.columns == TRAINING_COLUMNS).all()
-            y_eval_cv = train[train["fold"] == fold][target]
-
             pred = model.predict(X_eval_cv)
+            predictions.loc[X_eval_cv.index, pred_target] = pred
 
-            trues.extend(y_eval_cv)
-            preds.extend(pred)
-
-        rmse = np.sqrt(mean_squared_error(trues, preds))
-        metrics[target] = rmse
-
-    mcrmse = sum(metrics.values()) / len(metrics)
-    metrics["mcrmse"] = mcrmse
+    metrics = compute_mcrmse_for_trainer(
+        (predictions[PREDICTION_LABELS].values, predictions[TARGET_LABELS].values)
+    )
 
     if use_wandb:
         wandb.log(metrics)
 
-    return model_dict, metrics
+    return model_dict, metrics, predictions
