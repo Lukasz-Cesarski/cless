@@ -9,7 +9,7 @@ from cless import (
     WandbProjects,
     cless_ensamble_sweep,
     general_setup,
-    get_wandb_tags,
+    get_wandb_tags, KEEP_BEST_MODELS,
 )
 from transformers import HfArgumentParser
 
@@ -87,6 +87,45 @@ SWEEP_CONFIG_LARGE = {
     },
 }
 
+SWEEP_CONFIG_XLARGE = {
+    "method": "random",  # grid, random
+    "description": "|".join(get_wandb_tags()),
+    "metric": {
+        "name": "micro.test_mcrmse",
+        "goal": "minimize",
+    },
+    "parameters": {
+        "seed": {
+            "distribution": "int_uniform",
+            "min": 0,
+            "max": 1000,
+        },
+        "learning_rate": {
+            "distribution": "log_uniform_values",
+            "min": 1e-7,
+            "max": 5e-5,
+        },
+        "hidden_dropout_prob": {
+            "distribution": "log_uniform_values",
+            "min": 5e-5,
+            "max": 5e-2,
+        },
+        "attention_probs_dropout_prob": {
+            "distribution": "log_uniform_values",
+            "min": 5e-5,
+            "max": 5e-2,
+        },
+        "weight_decay": {
+            "distribution": "log_uniform_values",
+            "min": 5e-5,
+            "max": 1e-2,
+        },
+        "freeze_layers": {
+            'values': [3, 6, 9]
+        },
+    },
+}
+
 
 @dataclass
 class CommandLine:
@@ -105,6 +144,10 @@ class CommandLine:
         default=20,
         metadata={"help": "Number of hyperparameters search runs"},
     )
+    keep_best_models: Optional[int] = field(
+        default=KEEP_BEST_MODELS,
+        metadata={"help": "Number of experiments to keep"},
+    )
 
 
 if __name__ == "__main__":
@@ -114,7 +157,9 @@ if __name__ == "__main__":
 
     start = datetime.now()
     if cli.sweep_id is None:
-        if "large" in config.model_name_or_path:
+        if "xlarge" in config.model_name_or_path:
+            sweep_config = SWEEP_CONFIG_XLARGE.copy()
+        elif "large" in config.model_name_or_path:
             sweep_config = SWEEP_CONFIG_LARGE.copy()
         elif "base" in config.model_name_or_path:
             sweep_config = SWEEP_CONFIG_BASE.copy()
@@ -126,7 +171,7 @@ if __name__ == "__main__":
 
     wandb.agent(
         sweep_id=sweep_id,
-        function=lambda: cless_ensamble_sweep(cli_config=config),
+        function=lambda: cless_ensamble_sweep(input_config=config, keep_best_models=cli.keep_best_models),
         count=cli.count,
         project=WandbProjects.WANDB_DEBERTA_SWEEPS,
     )

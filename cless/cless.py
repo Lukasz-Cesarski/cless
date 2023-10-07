@@ -163,6 +163,8 @@ class Config:
     fp16: Optional[bool] = None
     pseudo_training: bool = False
     freeze_layers: int = 0
+    gradient_accumulation_steps: int = 1
+    gradient_checkpointing: bool = False
 
     def __post_init__(self):
         if self.fp16 is None:
@@ -282,6 +284,8 @@ class ClessModel:
             seed=config.seed,
             fp16=config.fp16,
             warmup_steps=config.warmup,
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
+            gradient_checkpointing=config.gradient_checkpointing,
         )
         model = AutoModelForSequenceClassification.from_pretrained(
             config.model_name_or_path, config=model_config
@@ -517,9 +521,9 @@ def cless_ensamble_train(config: Config):
     return fold_results, fold_results_log, new_dump_dir
 
 
-def cless_ensamble_sweep(cli_config: Config):
-    cli_config.report_to = "none"
-    default_params = asdict(cli_config)
+def cless_ensamble_sweep(input_config: Config, keep_best_models: int = KEEP_BEST_MODELS):
+    input_config.report_to = "none"
+    default_params = asdict(input_config)
     wandb.init(
         config=default_params,
         reinit=True,
@@ -537,7 +541,7 @@ def cless_ensamble_sweep(cli_config: Config):
     models_registry = {path: path.split("__") for path in os.listdir(models_home)}
     models_registry_fold_remove = sorted(
         models_registry.items(), key=lambda x: float(x[1][0]), reverse=False
-    )[KEEP_BEST_MODELS:]
+    )[keep_best_models:]
 
     for dir_name, _ in models_registry_fold_remove:
         full_dir_name = os.path.join(models_home, dir_name)
