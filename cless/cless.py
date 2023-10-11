@@ -269,7 +269,7 @@ class ClessModel:
             load_best_model_at_end=True,  # select best model
             learning_rate=config.learning_rate,
             per_device_train_batch_size=config.batch_size,
-            per_device_eval_batch_size=config.batch_size,
+            per_device_eval_batch_size=1,
             num_train_epochs=config.num_train_epochs,
             weight_decay=config.weight_decay,
             report_to=config.report_to,
@@ -566,6 +566,8 @@ def cless_single_fold_predict(fold_subdir, df):
         ],
         axis=1,
     )
+    torch.cuda.empty_cache()
+    gc.collect()
     return partial_prediction
 
 
@@ -619,7 +621,8 @@ def cless_ensamble_predict_test(models_home):
     submission_df = pd.concat(submission_targets, axis=1)[
         ["student_id"] + TARGET_LABELS
     ]
-
+    torch.cuda.empty_cache()
+    gc.collect()
     return submission_df
 
 
