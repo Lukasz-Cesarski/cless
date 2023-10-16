@@ -5,11 +5,12 @@ from typing import Optional
 
 import wandb
 from cless import (
+    KEEP_BEST_MODELS,
     Config,
     WandbProjects,
-    cless_ensamble_sweep,
+    cless_ensemble_sweep,
     general_setup,
-    get_wandb_tags, KEEP_BEST_MODELS,
+    get_wandb_tags,
 )
 from transformers import HfArgumentParser
 
@@ -120,9 +121,7 @@ SWEEP_CONFIG_XLARGE = {
             "min": 5e-5,
             "max": 1e-2,
         },
-        "freeze_layers": {
-            'values': [3, 6, 9]
-        },
+        "freeze_layers": {"values": [3, 6, 9]},
     },
 }
 
@@ -164,14 +163,18 @@ if __name__ == "__main__":
         elif "base" in config.model_name_or_path:
             sweep_config = SWEEP_CONFIG_BASE.copy()
         else:
-            raise NotImplemented(f"Not supported model name: {config.model_name_or_path}")
+            raise NotImplemented(
+                f"Not supported model name: {config.model_name_or_path}"
+            )
         sweep_id = wandb.sweep(sweep_config, project=WandbProjects.WANDB_DEBERTA_SWEEPS)
     else:
         sweep_id = cli.sweep_id
 
     wandb.agent(
         sweep_id=sweep_id,
-        function=lambda: cless_ensamble_sweep(input_config=config, keep_best_models=cli.keep_best_models),
+        function=lambda: cless_ensemble_sweep(
+            input_config=config, keep_best_models=cli.keep_best_models
+        ),
         count=cli.count,
         project=WandbProjects.WANDB_DEBERTA_SWEEPS,
     )

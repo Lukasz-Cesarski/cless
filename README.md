@@ -12,17 +12,17 @@ https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries
 This was my first Kaggle competition and I ended in 42nd position out of over 2000 teams.
 
 * Training code: [cless/run_sweep.py](https://github.com/Lukasz-Cesarski/cless/blob/main/cless/run_sweep.py)  
-* Inference [code](https://www.kaggle.com/code/luki493/lgbm-ensamble-iter-e6-open)
+* Inference [code](https://www.kaggle.com/code/luki493/lgbm-ensemble-iter-e6-open)
 
 ## Solution
 
 Final solution contains
 * 6 [Deberta](https://huggingface.co/docs/transformers/model_doc/deberta) models (2 base and 4 large)
 * LGBM on top of every model 
-* Late Fusion ensambling
+* Late Fusion ensemble
 
 
-![Solution](./solution.png "Solution")
+![solution](./solution.png "solution")
 
 
 ## Results
@@ -49,9 +49,9 @@ Columns:
 
 **Note**: Models without `prompt_text` and `prompt_question` in input (adds=False) has much worse CV `mcrmse`. 
 However this is mitigated by LGBM which utilizes `prompt_text` handcrafted text mining techniques and `lgbm_mcrmse` 
-is significantly improved for these mdoels
+is significantly improved for these models
 
-### Ensamble metrics
+### Ensemble metrics
 
 |   | metric                    | value |
 |--:|:--------------------------|:------|
@@ -59,7 +59,7 @@ is significantly improved for these mdoels
 | 2 | wording_rmse | 0.5389858871892348 | 
 | 3 | mcrmse | 0.47339642220872397 | 
 
-### Leaderbord
+### Leaderboard
 
 |   | metric           | value |
 |--:|:-----------------|:------|

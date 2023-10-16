@@ -4,8 +4,13 @@ from pprint import pprint
 from typing import Optional
 
 import wandb
-from cless import (DEPRECATED_KEYS, Config, WandbProjects,
-                   cless_ensamble_train, general_setup)
+from cless import (
+    DEPRECATED_KEYS,
+    Config,
+    WandbProjects,
+    cless_ensemble_train,
+    general_setup,
+)
 from transformers import HfArgumentParser
 
 
@@ -40,5 +45,5 @@ if __name__ == "__main__":
                 setattr(config, k, v)
 
     pprint(config)
-    fold_results, fold_results_log, new_dump_dir = cless_ensamble_train(config=config)
+    fold_results, fold_results_log, new_dump_dir = cless_ensemble_train(config=config)
     pprint(f"Script timer: {datetime.now() - start}")

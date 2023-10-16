@@ -36,10 +36,16 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from torch import nn
 from tqdm import tqdm
-from transformers import (AutoConfig, AutoModelForSequenceClassification,
-                          AutoTokenizer, DataCollatorWithPadding,
-                          EarlyStoppingCallback, Trainer, TrainingArguments,
-                          set_seed)
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+    EarlyStoppingCallback,
+    Trainer,
+    TrainingArguments,
+    set_seed,
+)
 from transformers.trainer_utils import PredictionOutput
 
 
@@ -53,11 +59,11 @@ class Files:
 # Weights and biased metrics tracking and sweeps
 class WandbProjects:
     WANDB_DEBERTA_FOLDS = "cless-deberta-folds"
-    WANDB_DEBERTA_ENSAMBLE = "cless-deberta-ensamble"
+    WANDB_DEBERTA_ENSEMBLE = "cless-deberta-ensamble"  # typo
     WANDB_DEBERTA_SWEEPS = "cless-deberta-sweeps"
 
     WANDB_LGBM_FOLDS = "cless-lgbm-folds"
-    WANDB_LGBM_ENSAMBLE = "cless-lgbm-ensamble"
+    WANDB_LGBM_ENSEMBLE = "cless-lgbm-ensamble"  # typo
     WANDB_LGBM_SWEEPS = "cless-lgbm-sweeps"
 
 
@@ -461,14 +467,14 @@ class ClessModel:
         return predictions
 
 
-def cless_ensamble_train(config: Config):
+def cless_ensemble_train(config: Config):
     """Train single model for every fold"""
     fold_results = {}
-    ensamble_start = datetime.now().isoformat()[:-7]
+    ensemble_start = datetime.now().isoformat()[:-7]
     dump_dir = os.path.join(
         MODEL_DUMPS_DIR,
         config.model_name_or_path.replace("/", "_"),
-        ensamble_start,
+        ensemble_start,
     )
 
     for fold in range(4):
@@ -507,7 +513,7 @@ def cless_ensamble_train(config: Config):
     if config.report_to == "wandb":
         run = wandb.init(
             # Set the project where this run will be logged
-            project=WandbProjects.WANDB_DEBERTA_ENSAMBLE,
+            project=WandbProjects.WANDB_DEBERTA_ENSEMBLE,
             # Track hyperparameters and run metadata
             config=asdict(config),
             tags=get_wandb_tags(),
@@ -527,7 +533,7 @@ def cless_ensamble_train(config: Config):
     return fold_results, fold_results_log, new_dump_dir
 
 
-def cless_ensamble_sweep(
+def cless_ensemble_sweep(
     input_config: Config, keep_best_models: int = KEEP_BEST_MODELS
 ):
     """
@@ -544,7 +550,7 @@ def cless_ensamble_sweep(
     )
     config = Config(**wandb.config)
 
-    fold_results, fold_results_log, new_dump_dir = cless_ensamble_train(config=config)
+    fold_results, fold_results_log, new_dump_dir = cless_ensemble_train(config=config)
 
     wandb.log(fold_results_log)
 
@@ -583,7 +589,7 @@ def cless_single_fold_predict(fold_subdir: str, df: pd.DataFrame) -> pd.DataFram
     return partial_prediction
 
 
-def cless_ensamble_predict_train(models_home: str) -> Tuple[pd.DataFrame, Dict]:
+def cless_ensemble_predict_train(models_home: str) -> Tuple[pd.DataFrame, Dict]:
     """Make OOF (Out of Fold) predictions to continue training with LGBM"""
     train_pro, test_pro, train_sum, test_sum = read_cless_data()
     df = train_pro.merge(train_sum, on="prompt_id")
@@ -612,7 +618,7 @@ def cless_ensamble_predict_train(models_home: str) -> Tuple[pd.DataFrame, Dict]:
     return df_metrics, metrics
 
 
-def cless_ensamble_predict_test(models_home: str) -> pd.DataFrame:
+def cless_ensemble_predict_test(models_home: str) -> pd.DataFrame:
     """Make predictions for test set for submission purposes"""
     train_pro, test_pro, train_sum, test_sum = read_cless_data()
     df = test_pro.merge(test_sum, on="prompt_id")
