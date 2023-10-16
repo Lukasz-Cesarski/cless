@@ -6,7 +6,7 @@
 This code is related to the Kaggle competition:  
 
 **CommonLit - Evaluate Student Summaries**   
-Automatically assess summaries written by students in grades 3-12
+Automatically assess summaries written by students in grades 3-12  
 https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries
 
 This was my first Kaggle competition and I ended in 42nd position out of over 2000 teams.
@@ -63,7 +63,7 @@ is significantly improved for these mdoels
 
 |   | metric           | value |
 |--:|:-----------------|:------|
-| 1 | mcrmse (public)  | 0.40780695722821314 | 
-| 2 | mcrmse (private) | 0.40780695722821314 |
+| 1 | mcrmse (public)  | 0.432 | 
+| 2 | mcrmse (private) | 0.468 |
 
 Kudos for the author of [this notebook](https://www.kaggle.com/code/tsunotsuno/updated-debertav3-lgbm-with-spell-autocorrect) it helped me a lot.
