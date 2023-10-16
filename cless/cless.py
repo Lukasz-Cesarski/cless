@@ -6,7 +6,7 @@ This file stores essential parts of code.
 The code is organized this way to provide easy:
 - version control in GIT
 - upload to remote machines
-- pasting it kaggle notebook (use magic `%%writefile cless.py` command)
+- pasting into kaggle notebook (use magic `%%writefile cless.py` command)
 - code development (code refactor, black formatting, import sort)
 """
 
@@ -40,6 +40,7 @@ from transformers import (AutoConfig, AutoModelForSequenceClassification,
                           AutoTokenizer, DataCollatorWithPadding,
                           EarlyStoppingCallback, Trainer, TrainingArguments,
                           set_seed)
+from transformers.trainer_utils import PredictionOutput
 
 
 class Files:
@@ -49,6 +50,7 @@ class Files:
     SUM_TEST_FILE = "summaries_test.csv"
 
 
+# Weights and biased metrics tracking and sweeps
 class WandbProjects:
     WANDB_DEBERTA_FOLDS = "cless-deberta-folds"
     WANDB_DEBERTA_ENSAMBLE = "cless-deberta-ensamble"
@@ -174,7 +176,7 @@ class Config:
                 self.fp16 = False
 
 
-def tokenize(example, tokenizer, config, labelled=True):
+def tokenize(example, tokenizer, config: Config, labelled: bool = True):
     sep = f" {tokenizer.sep_token} "
 
     cols = []
@@ -200,7 +202,7 @@ def tokenize(example, tokenizer, config, labelled=True):
     return result
 
 
-def compute_mcrmse_for_trainer(eval_pred):
+def compute_mcrmse_for_trainer(eval_pred: Tuple) -> Dict:
     """
     Calculates mean columnwise root mean squared error
     https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries/overview/evaluation
@@ -218,11 +220,14 @@ def compute_mcrmse_for_trainer(eval_pred):
 
 
 def turn_off_params(module: nn.Module) -> None:
+    """To freeze some transformer layers"""
     for param in module.parameters():
         param.requires_grad = False
 
 
 class ClessModel:
+    """Basic class for a single fold"""
+
     def __init__(
         self,
         model_name_or_path: str,
@@ -237,7 +242,7 @@ class ClessModel:
         self,
         config: Config,
         fold: int,
-    ):
+    ) -> PredictionOutput:
         model_config = AutoConfig.from_pretrained(self.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
         data_collator = DataCollatorWithPadding(tokenizer)
@@ -412,7 +417,7 @@ class ClessModel:
 
         return eval_res
 
-    def predict_single_fold(self, df):
+    def predict_single_fold(self, df: pd.DataFrame) -> PredictionOutput:
         model_config = AutoConfig.from_pretrained(self.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
         data_collator = DataCollatorWithPadding(tokenizer)
@@ -457,6 +462,7 @@ class ClessModel:
 
 
 def cless_ensamble_train(config: Config):
+    """Train single model for every fold"""
     fold_results = {}
     ensamble_start = datetime.now().isoformat()[:-7]
     dump_dir = os.path.join(
@@ -521,7 +527,13 @@ def cless_ensamble_train(config: Config):
     return fold_results, fold_results_log, new_dump_dir
 
 
-def cless_ensamble_sweep(input_config: Config, keep_best_models: int = KEEP_BEST_MODELS):
+def cless_ensamble_sweep(
+    input_config: Config, keep_best_models: int = KEEP_BEST_MODELS
+):
+    """
+    Run training with hyperparameter search using W&B Sweeps
+    https://docs.wandb.ai/guides/sweeps
+    """
     input_config.report_to = "none"
     default_params = asdict(input_config)
     wandb.init(
@@ -548,7 +560,7 @@ def cless_ensamble_sweep(input_config: Config, keep_best_models: int = KEEP_BEST
         shutil.rmtree(full_dir_name)
 
 
-def cless_single_fold_predict(fold_subdir, df):
+def cless_single_fold_predict(fold_subdir: str, df: pd.DataFrame) -> pd.DataFrame:
     """For cross-validation / LGBM training"""
     assert os.path.isdir(fold_subdir)
     cless_deberta = ClessModel(
@@ -571,7 +583,8 @@ def cless_single_fold_predict(fold_subdir, df):
     return partial_prediction
 
 
-def cless_ensamble_predict_train(models_home):
+def cless_ensamble_predict_train(models_home: str) -> Tuple[pd.DataFrame, Dict]:
+    """Make OOF (Out of Fold) predictions to continue training with LGBM"""
     train_pro, test_pro, train_sum, test_sum = read_cless_data()
     df = train_pro.merge(train_sum, on="prompt_id")
     assert set(ID2FOLD.keys()) == set(df["prompt_id"].unique())
@@ -599,7 +612,8 @@ def cless_ensamble_predict_train(models_home):
     return df_metrics, metrics
 
 
-def cless_ensamble_predict_test(models_home):
+def cless_ensamble_predict_test(models_home: str) -> pd.DataFrame:
+    """Make predictions for test set for submission purposes"""
     train_pro, test_pro, train_sum, test_sum = read_cless_data()
     df = test_pro.merge(test_sum, on="prompt_id")
 
@@ -628,7 +642,11 @@ def cless_ensamble_predict_test(models_home):
 
 class CPMPSpellchecker:
     """
-    All credits goes to:
+    Custom spellchecker was written due to problems with open source libraries:
+    https://github.com/filyp/autocorrect (LGPL-3.0 license)
+    https://github.com/barrust/pyspellchecker (performance)
+
+    Credits to:
     https://www.kaggle.com/competitions/commonlit-evaluate-student-summaries/discussion/433451
     https://www.kaggle.com/code/atamazian/spell-checker-using-word2vec-updated-work-by-cpmp/notebook
     https://www.kaggle.com/code/cpmpml/spell-checker-using-word2vec
@@ -710,6 +728,8 @@ class CPMPSpellchecker:
 
 
 class Preprocessor:
+    """Extract handcrafted text mining features from text"""
+
     def __init__(self) -> None:
         self.STOP_WORDS = set(stopwords.words("english"))
         self.cpmpspellchecker = CPMPSpellchecker()
@@ -901,6 +921,7 @@ class Preprocessor:
         ] / (input_df["summary_length"] - 1)
         input_df["ner_co_occurence"] = input_df.apply(self.ner_co_occurence, axis=1)
 
+        ### TEXTSTAT LIBRARY FUNCTION ###
         textstat_functions = [
             "flesch_reading_ease",
             "flesch_kincaid_grade",
@@ -934,7 +955,10 @@ class Preprocessor:
         return input_df.drop(columns=drop_columns)
 
 
-def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
+def get_preprocessed_dataset(
+    prompts: pd.DataFrame, summaries: pd.DataFrame, save_path: str, preprocessor=None
+):
+    """Run preporcessor for dataset if not cached in `save_path'."""
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     if save_path.exists():
@@ -951,7 +975,9 @@ def get_preprocessed_dataset(prompts, summaries, save_path, preprocessor=None):
     return input_df
 
 
-def train_lgbm(train, drop_columns, use_wandb=True, default_params=None):
+def train_lgbm(
+    train: pd.DataFrame, drop_columns: List[str], use_wandb=True, default_params=None
+):
 
     if default_params is None:
         # defaults
@@ -967,7 +993,7 @@ def train_lgbm(train, drop_columns, use_wandb=True, default_params=None):
             "min_data_in_bin": 5,  # like in OLD
             "lambda_l1": 0.0,  # default
             "lambda_l2": 0.0,  # default
-            "max_bin": 127,  # takie mid
+            "max_bin": 127,  # take middle value
             "feature_fraction": 1.0,  # check
             "bagging_fraction": 1.0,  # check
         }
