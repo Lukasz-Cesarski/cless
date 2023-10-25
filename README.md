@@ -19,7 +19,7 @@ This was my first Kaggle competition and I ended in 42nd position out of over 20
 Final solution contains
 * 6 [Deberta](https://huggingface.co/docs/transformers/model_doc/deberta) models (2 base and 4 large)
 * LGBM on top of every model 
-* Late Fusion ensemble
+* Late ensembling
 
 
 ![solution](./solution.png "solution")
